@@ -426,3 +426,62 @@ class WebappLibraryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkspaceRedesignTests(unittest.TestCase):
+    """Contracts the content-first web page relies on."""
+
+    def setUp(self) -> None:
+        os.environ["DOC_READER_ANALYSIS_ENABLED"] = "0"
+        self._tmp = tempfile.TemporaryDirectory()
+        self.reader = ReaderService(Path(self._tmp.name))
+
+    def tearDown(self) -> None:
+        self.reader.shutdown()
+        self._tmp.cleanup()
+        os.environ.pop("DOC_READER_ANALYSIS_ENABLED", None)
+
+    def test_page_has_workspace_regions_and_controls(self) -> None:
+        for marker in [
+            'id="librarySidebar"',
+            'id="workspaceSurface"',
+            'id="inspector"',
+            'id="readText"',
+            'id="pause"',
+            'id="stop"',
+            'id="newText"',
+            'id="libraryToggle"',
+            'id="inspectorToggle"',
+            'id="copyItem"',
+            'id="editItem"',
+            'role="listbox"',
+            'aria-live="polite"',
+            "docReader.draft",
+            "docReader.selectedId",
+            "prefers-reduced-motion",
+            "prefers-contrast",
+        ]:
+            self.assertIn(marker, INDEX_HTML)
+        # Every file input keeps a visible, labelled button and an accessible name.
+        self.assertIn('aria-label="Import document"', INDEX_HTML)
+        self.assertIn('aria-label="Import audio"', INDEX_HTML)
+
+    def test_imported_text_document_is_readable_and_editable_in_workspace(self) -> None:
+        item = self.reader.add_document("notes.txt", b"First line.\n\nSecond paragraph.\n")
+        self.assertEqual(item.kind, "document")
+        self.assertEqual(item.title, "notes.txt")
+        text = self.reader.item_text(item.id)["text"]
+        self.assertIn("Second paragraph.", text)
+        self.assertIn("\n\n", text)
+        updated = self.reader.update_item_text(item.id, "Edited body.")
+        self.assertEqual(updated["item"]["id"], item.id)
+        self.assertEqual(self.reader.item_text(item.id)["text"].strip(), "Edited body.")
+        # Saving edits never creates a second item.
+        self.assertEqual(len(self.reader.library_items()), 1)
+
+    def test_pdf_document_has_no_text_preview_but_keeps_its_card(self) -> None:
+        item = self.reader.add_document("paper.pdf", b"%PDF-1.4 not a real pdf")
+        with self.assertRaises(ValueError):
+            self.reader.item_text(item.id)
+        payloads = self.reader.library_items()
+        self.assertEqual(payloads[0]["title"], "paper.pdf")
