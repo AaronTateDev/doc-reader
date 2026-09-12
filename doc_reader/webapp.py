@@ -3028,7 +3028,43 @@ def _read_text_file(path: Path) -> str:
         return ""
 
 
+_HEALTH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_HEALTH_CACHE_LOCK = threading.Lock()
+DEFAULT_HEALTH_CACHE_OK_SECONDS = 1.5
+DEFAULT_HEALTH_CACHE_FAIL_SECONDS = 10.0
+
+
+def _service_health_cache_clear() -> None:
+    with _HEALTH_CACHE_LOCK:
+        _HEALTH_CACHE.clear()
+
+
 def _service_health(base_url: str, *, timeout: float | None = None) -> dict[str, Any]:
+    """Probe a speech service, caching the answer briefly.
+
+    `state()` is polled by the page about once a second and calls this for every
+    configured service while holding the reader lock. An unreachable remote
+    service (for example the author's Tailscale box when running elsewhere) would
+    otherwise cost a full connect timeout on every poll and stall dictation and
+    playback requests behind the lock.
+    """
+    ok_ttl = _env_float("DOC_READER_SERVICE_HEALTH_CACHE_SECONDS", DEFAULT_HEALTH_CACHE_OK_SECONDS)
+    fail_ttl = _env_float("DOC_READER_SERVICE_HEALTH_FAIL_CACHE_SECONDS", DEFAULT_HEALTH_CACHE_FAIL_SECONDS)
+    now = time.monotonic()
+    with _HEALTH_CACHE_LOCK:
+        cached = _HEALTH_CACHE.get(base_url)
+    if cached is not None:
+        cached_at, payload = cached
+        ttl = ok_ttl if payload.get("ok") else fail_ttl
+        if now - cached_at < ttl:
+            return dict(payload)
+    payload = _service_health_uncached(base_url, timeout=timeout)
+    with _HEALTH_CACHE_LOCK:
+        _HEALTH_CACHE[base_url] = (time.monotonic(), dict(payload))
+    return payload
+
+
+def _service_health_uncached(base_url: str, *, timeout: float | None = None) -> dict[str, Any]:
     started = time.perf_counter()
     timeout_seconds = timeout
     if timeout_seconds is None:

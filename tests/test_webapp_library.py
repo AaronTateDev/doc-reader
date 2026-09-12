@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from doc_reader.platform_tools import LOCAL_STT_LABEL, dictation_hotkey_label
-from doc_reader.webapp import INDEX_HTML, SPEECH_BACKENDS, ReaderService
+from doc_reader.webapp import INDEX_HTML, SPEECH_BACKENDS, ReaderService, _service_health_cache_clear
 
 
 class FakeSpeechHandler(BaseHTTPRequestHandler):
@@ -105,6 +105,9 @@ class WebappLibraryTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeSpeechHandler.calls = []
         FakeSpeechHandler.health_payload = None
+        _service_health_cache_clear()
+        os.environ["DOC_READER_SERVICE_HEALTH_CACHE_SECONDS"] = "0"
+        os.environ["DOC_READER_SERVICE_HEALTH_FAIL_CACHE_SECONDS"] = "0"
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeSpeechHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()

@@ -224,61 +224,142 @@ def _input_devices() -> list[dict[str, Any]]:
 
 
 class Recorder:
-    def __init__(self) -> None:
+    """Microphone capture with a pre-armed stream.
+
+    Opening a Windows audio device costs a few hundred milliseconds, which is exactly
+    the lag you feel between pressing the dictation key and recording starting. So
+    while dictation is enabled the stream stays open and idle; pressing the key only
+    flips a flag. A short pre-roll ring buffer is kept so the first syllable spoken
+    right as the key goes down is not lost.
+    """
+
+    BLOCKSIZE = 512  # 32 ms at 16 kHz
+
+    def __init__(self, *, prearm: bool = True, preroll_seconds: float = 0.3) -> None:
+        import collections
+
         self._stream = None
+        self._stream_device: int | None = None
+        self._stream_lock = threading.Lock()
         self._frames: list[bytes] = []
+        self._preroll: collections.deque[bytes] = collections.deque(
+            maxlen=max(1, int(preroll_seconds * SAMPLE_RATE / self.BLOCKSIZE))
+        )
         self._lock = threading.Lock()
+        self._capturing = False
+        self.prearm = prearm
         self.level = 0.0
         self.peak = 0.0
         self.started_at = 0.0
         self.active = False
+        self.last_error = ""
 
-    def start(self, device_index: int | None) -> None:
+    def _callback(self, indata, _frames, _time_info, _status) -> None:  # noqa: ANN001
         import numpy as np
+
+        chunk = bytes(indata)
+        with self._lock:
+            if self._capturing:
+                self._frames.append(chunk)
+            else:
+                self._preroll.append(chunk)
+                return
+        samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+        if samples.size:
+            rms = float(np.sqrt(np.mean(samples * samples)))
+            self.level = min(1.0, rms * 6.0)
+            self.peak = max(self.peak, self.level)
+
+    def _open_stream(self, device_index: int | None) -> None:
         import sounddevice as sd
 
-        self._frames = []
-        self.level = 0.0
-        self.peak = 0.0
-
-        def callback(indata, _frames, _time_info, status) -> None:  # noqa: ANN001
-            if status:
-                pass
-            chunk = bytes(indata)
+        with self._stream_lock:
+            if self._stream is not None and self._stream_device == device_index:
+                return
+            self._close_stream_locked()
+            try:
+                stream = sd.InputStream(
+                    samplerate=SAMPLE_RATE,
+                    channels=1,
+                    dtype="int16",
+                    device=device_index,
+                    callback=self._callback,
+                    blocksize=self.BLOCKSIZE,
+                )
+                stream.start()
+            except Exception:
+                if device_index is not None:
+                    # Selected device failed: fall back to the system default.
+                    stream = sd.InputStream(
+                        samplerate=SAMPLE_RATE,
+                        channels=1,
+                        dtype="int16",
+                        device=None,
+                        callback=self._callback,
+                        blocksize=self.BLOCKSIZE,
+                    )
+                    stream.start()
+                    device_index = None
+                else:
+                    raise
+            self._stream = stream
+            self._stream_device = device_index
             with self._lock:
-                self._frames.append(chunk)
-            samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-            if samples.size:
-                rms = float(np.sqrt(np.mean(samples * samples)))
-                self.level = min(1.0, rms * 6.0)
-                self.peak = max(self.peak, self.level)
+                self._preroll.clear()
 
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="int16",
-            device=device_index,
-            callback=callback,
-            blocksize=1024,
-        )
-        self._stream.start()
-        self.started_at = time.monotonic()
-        self.active = True
-
-    def stop(self) -> tuple[bytes, float]:
-        elapsed = time.monotonic() - self.started_at if self.started_at else 0.0
-        self.active = False
+    def _close_stream_locked(self) -> None:
         stream = self._stream
         self._stream = None
+        self._stream_device = None
         if stream is not None:
             try:
                 stream.stop()
                 stream.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def is_armed(self) -> bool:
+        return self._stream is not None
+
+    def arm(self, device_index: int | None) -> bool:
+        """Open the microphone ahead of time so the next key press starts instantly."""
+        if self.active:
+            return True
+        try:
+            self._open_stream(device_index)
+            self.last_error = ""
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            return False
+
+    def disarm(self) -> None:
+        if self.active:
+            return
+        with self._stream_lock:
+            self._close_stream_locked()
+
+    def start(self, device_index: int | None) -> None:
+        self._open_stream(device_index)  # instant when already armed on this device
         with self._lock:
+            self._frames = list(self._preroll)
+            self._preroll.clear()
+            self._capturing = True
+        self.level = 0.0
+        self.peak = 0.0
+        self.started_at = time.monotonic()
+        self.active = True
+
+    def stop(self) -> tuple[bytes, float]:
+        elapsed = time.monotonic() - self.started_at if self.started_at else 0.0
+        self.active = False
+        with self._lock:
+            self._capturing = False
             raw = b"".join(self._frames)
             self._frames = []
+        if not self.prearm:
+            with self._stream_lock:
+                self._close_stream_locked()
         buffer = io.BytesIO()
         with wave.open(buffer, "wb") as handle:
             handle.setnchannels(1)
@@ -357,7 +438,8 @@ def main() -> int:
         stateUpdated = Signal(dict)
 
     bridge = Bridge()
-    recorder = Recorder()
+    prearm = os.getenv("DOC_READER_DICTATION_PREARM", "1").strip().lower() not in {"0", "false", "no", "off"}
+    recorder = Recorder(prearm=prearm)
     state: dict[str, Any] = {
         "stt_enabled": True,
         "selected_microphone_id": "",
@@ -568,9 +650,9 @@ def main() -> int:
             set_status(f"Microphone error: {exc}")
             notify("Doc Reader", f"Could not start recording: {exc}")
             return
+        show_hud(f"●  Recording…  release {dictation_hotkey_label()} to transcribe")
         state["last_event"] = "recording started"
         tray.setIcon(_build_icon(recording=True))
-        show_hud(f"●  Recording…  release {dictation_hotkey_label()} to transcribe")
         set_status("Recording dictation...")
 
     def on_dictation_stopped() -> None:
@@ -736,6 +818,13 @@ def main() -> int:
                 state["running"] = bool(status.get("running"))
                 state["paused"] = bool(status.get("paused"))
                 state["active_id"] = str(status.get("active_id") or "")
+                # Keep the microphone stream open (idle) so the dictation key starts
+                # capturing immediately instead of waiting for the device to open.
+                if recorder.prearm and state["stt_enabled"]:
+                    if not recorder.arm(selected_device_index()) and recorder.last_error:
+                        state["last_event"] = f"microphone unavailable: {recorder.last_error}"
+                elif recorder.prearm:
+                    recorder.disarm()
                 bridge.stateUpdated.emit(
                     {
                         "status": str(status.get("status") or "Doc Reader ready."),
