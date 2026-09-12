@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from .platform_tools import configure_espeak, configure_windows_dll_search
+
 
 DEFAULT_ENGINES = ("chatterbox", "kokoro")
 DEFAULT_KOKORO_VOICE = "af_heart"
@@ -359,6 +361,7 @@ class EngineRegistry:
             if self._kokoro_pipeline is not None:
                 return self._kokoro_pipeline
             try:
+                configure_espeak()
                 from kokoro import KPipeline
 
                 try:
@@ -377,6 +380,7 @@ class EngineRegistry:
             if self._whisper_model is not None:
                 return self._whisper_model
             try:
+                configure_windows_dll_search()
                 from faster_whisper import WhisperModel
 
                 compute_type = _env(
@@ -545,6 +549,15 @@ class TTSServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, handler)
         self.registry = registry
+
+    def handle_error(self, request, client_address) -> None:  # noqa: ANN001
+        # Clients that give up while a model is loading produce noisy stack traces
+        # on Windows (WinError 10053/10054). Log one line instead.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            print(f"[doc-reader-tts] client {client_address[0]} disconnected early", flush=True)
+            return
+        super().handle_error(request, client_address)
 
 
 def _torch_audio_to_wav_bytes(wav: Any, sample_rate: int) -> bytes:

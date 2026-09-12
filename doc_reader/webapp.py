@@ -30,6 +30,15 @@ from urllib import request as urlrequest
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .extract import iter_document_blocks
+from .platform_tools import (
+    IS_WINDOWS,
+    LOCAL_KOKORO_LABEL,
+    LOCAL_STT_LABEL,
+    dictation_hotkey_label,
+    find_tool,
+    kill_process_tree,
+    popen_process_group_kwargs,
+)
 from .speech import (
     DEFAULT_TTS_MAC_URL,
     DEFAULT_TTS_UMBRA_URL,
@@ -80,7 +89,7 @@ SPEECH_BACKENDS = {
     "auto": "Local fallback",
     "tailscale-chatterbox": "Remote Chatterbox (experimental)",
     "tailscale-kokoro": "Remote Kokoro",
-    "local-kokoro": "Mac Kokoro",
+    "local-kokoro": LOCAL_KOKORO_LABEL,
     "macsay": "macOS Voice",
     "openai": "OpenAI API",
 }
@@ -300,7 +309,7 @@ class ReaderService:
             "active_id": self._active_id or self._paused_id,
             "stt": {
                 "enabled": self._stt_enabled(),
-                "hotkey": "Option",
+                "hotkey": dictation_hotkey_label(),
                 "microphone": _microphone_payload(settings),
             },
         }
@@ -661,7 +670,7 @@ class ReaderService:
             env = os.environ.copy()
             package_root = str(Path(__file__).resolve().parents[1])
             env["PYTHONPATH"] = package_root + (
-                f":{env['PYTHONPATH']}" if env.get("PYTHONPATH") else ""
+                f"{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else ""
             )
             if backend == "openai":
                 self._extend_openai_args(args)
@@ -681,7 +690,7 @@ class ReaderService:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                start_new_session=True,
+                **popen_process_group_kwargs(),
             )
 
             self._process = process
@@ -751,6 +760,15 @@ class ReaderService:
         return self.state()
 
     def start_native_helper(self) -> dict[str, Any]:
+        if IS_WINDOWS:
+            from .windows_app import start_helper
+
+            self._clear_native_helper_runtime_status("native helper starting from web app")
+            message = start_helper()
+            with self._lock:
+                self._status = message
+                status = self._status
+            return {"ok": True, "status": status}
         if sys.platform != "darwin":
             raise RuntimeError("The native helper is only available on macOS.")
         uid = os.getuid()
@@ -784,6 +802,15 @@ class ReaderService:
         return {"ok": True, "status": status}
 
     def reset_native_helper(self) -> dict[str, Any]:
+        if IS_WINDOWS:
+            from .windows_app import restart_helper
+
+            self._clear_native_helper_runtime_status("native helper reset requested")
+            message = restart_helper()
+            with self._lock:
+                self._status = message
+                status = self._status
+            return {"ok": True, "status": status}
         if sys.platform != "darwin":
             raise RuntimeError("The native helper is only available on macOS.")
         uid = os.getuid()
@@ -828,6 +855,15 @@ class ReaderService:
         return {"ok": True, "status": status}
 
     def stop_native_helper(self) -> dict[str, Any]:
+        if IS_WINDOWS:
+            from .windows_app import stop_helper
+
+            message = stop_helper()
+            self._clear_native_helper_runtime_status("native helper stopped from web app")
+            with self._lock:
+                self._status = message
+                status = self._status
+            return {"ok": True, "status": status}
         if sys.platform != "darwin":
             raise RuntimeError("The native helper is only available on macOS.")
         uid = os.getuid()
@@ -923,7 +959,7 @@ class ReaderService:
         settings = self._settings()
         return {
             "enabled": self._stt_enabled(),
-            "hotkey": "Option",
+            "hotkey": dictation_hotkey_label(),
             "backend": stt_backend,
             "label": _stt_service_label(stt_backend),
             "service": service,
@@ -2031,6 +2067,14 @@ class DocReaderHTTPServer(ThreadingHTTPServer):
 def _terminate_process_group(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
+    if IS_WINDOWS:
+        # taskkill /T stops the reader and the ffplay child it may be waiting on.
+        kill_process_tree(process.pid, force=True)
+        try:
+            process.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        return
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except OSError:
@@ -3029,7 +3073,7 @@ def _stt_default_url() -> str:
 
 def _stt_service_label(backend: str) -> str:
     if backend == "mac-whisper":
-        return "Mac speech-to-text"
+        return LOCAL_STT_LABEL
     if backend == "custom-whisper":
         return "Speech-to-text"
     return "Remote speech-to-text"
@@ -3336,16 +3380,7 @@ def _suffix_from_content_type(content_type: str) -> str:
 
 
 def _local_tool(name: str) -> str:
-    candidates = [
-        shutil.which(name) or "",
-        f"/opt/homebrew/bin/{name}",
-        f"/usr/local/bin/{name}",
-        f"/usr/bin/{name}",
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return candidate
-    return ""
+    return find_tool(name)
 
 
 def _optional_string(value: object) -> str | None:

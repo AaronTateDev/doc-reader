@@ -45,6 +45,13 @@ except ModuleNotFoundError as exc:  # pragma: no cover - runtime dependency guar
     ) from exc
 
 from .extract import iter_document_blocks
+from .platform_tools import (
+    DEFAULT_WINDOWS_SELECTION_HOTKEY,
+    IS_WINDOWS,
+    LOCAL_KOKORO_LABEL,
+    kill_process_tree,
+    selection_hotkey_label,
+)
 from .speech import (
     OPENAI_TTS_INSTRUCTIONS,
     OPENAI_TTS_MODEL,
@@ -79,11 +86,13 @@ LOCAL_TTS_OPTIONS = [
     ("Remote Kokoro (strict)", "tailscale-4090"),
     ("Remote Kokoro", "tailscale-kokoro"),
     ("Remote Chatterbox (experimental)", "tailscale-chatterbox"),
-    ("Mac Kokoro", "local-kokoro"),
+    (LOCAL_KOKORO_LABEL, "local-kokoro"),
 ]
-DEFAULT_SELECTION_SHORTCUT = "<ctrl>+<alt>+<cmd>+r"
+DEFAULT_SELECTION_SHORTCUT = (
+    DEFAULT_WINDOWS_SELECTION_HOTKEY if IS_WINDOWS else "<ctrl>+<alt>+<cmd>+r"
+)
 SELECTION_SHORTCUT = os.getenv("DOC_READER_SELECTION_SHORTCUT", DEFAULT_SELECTION_SHORTCUT)
-SELECTION_SHORTCUT_LABEL = "Control+Option+Command+R"
+SELECTION_SHORTCUT_LABEL = selection_hotkey_label()
 SERVICE_INBOX_DIR = Path.home() / ".doc-reader-managed" / "service-inbox"
 LIBRARY_SETTINGS_KEY = "library/items_v1"
 LIBRARY_MAX_ITEMS = 50
@@ -300,6 +309,10 @@ def _detect_chapters_for_path(path: Path, rate_wpm: int = DEFAULT_RATE) -> list[
 
 
 def _capture_selected_text_from_frontmost_app() -> str:
+    if IS_WINDOWS:
+        from .windows_helper import capture_selected_text
+
+        return capture_selected_text()
     if sys.platform != "darwin":
         return ""
 
@@ -354,7 +367,8 @@ return selectedText
 
 def _read_clipboard_text() -> str:
     if sys.platform != "darwin":
-        return ""
+        clipboard = QApplication.clipboard()
+        return (clipboard.text() if clipboard is not None else "").strip()
     try:
         output = subprocess.check_output(
             ["pbpaste"],
@@ -635,7 +649,7 @@ class ReaderRunner(QObject):
         self.statusChanged.emit("Stopping...")
         root_pid = int(self._process.processId())
 
-        self._send_signal_tree(root_pid, signal.SIGCONT, include_root=True)
+        self._resume_tree(root_pid)
         # Stop child audio processes first, then kill the reader quickly so UI unblocks.
         self._kill_process_tree(root_pid, include_root=False, force=True)
         self._process.terminate()
@@ -688,7 +702,7 @@ class ReaderRunner(QObject):
         self.pausedChanged.emit(True)
 
         root_pid = int(self._process.processId())
-        self._send_signal_tree(root_pid, signal.SIGCONT, include_root=True)
+        self._resume_tree(root_pid)
         self._kill_process_tree(root_pid, include_root=False, force=True)
         self._process.terminate()
         if not self._process.waitForFinished(220):
@@ -844,7 +858,17 @@ class ReaderRunner(QObject):
             except OSError:
                 continue
 
+    def _resume_tree(self, pid: int) -> None:
+        sigcont = getattr(signal, "SIGCONT", None)
+        if sigcont is None:
+            return
+        self._send_signal_tree(pid, sigcont, include_root=True)
+
     def _kill_process_tree(self, pid: int, *, include_root: bool, force: bool) -> None:
+        if IS_WINDOWS:
+            # taskkill /T always includes the root; the caller terminates it anyway.
+            kill_process_tree(pid, force=force)
+            return
         sig = signal.SIGKILL if force else signal.SIGTERM
         self._send_signal_tree(pid, sig, include_root=include_root)
 

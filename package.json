@@ -1,7 +1,7 @@
 {
   "name": "read-docs",
   "version": "0.4.1",
-  "description": "macOS local-first speech workspace for document reading, dictation, and library analysis.",
+  "description": "Local-first speech workspace for document reading, dictation, and library analysis (macOS menu-bar app and Windows tray helper, Kokoro TTS + Whisper STT).",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -22,7 +22,10 @@
     "read-selection-service.sh",
     "requirements.txt",
     "run-doc-reader",
-    "uninstall-context-menu-service"
+    "uninstall-context-menu-service",
+    "run-doc-reader.ps1",
+    "run-doc-reader.cmd",
+    "requirements-windows.txt"
   ],
   "scripts": {
     "pack:dry-run": "npm pack --dry-run"
@@ -43,16 +46,18 @@
     "macos",
     "menubar",
     "launchagent",
-    "reader"
+    "reader",
+    "windows",
+    "cuda"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SproutSeeds/doc-reader.git"
+    "url": "git+https://github.com/AaronTateDev/doc-reader.git"
   },
   "bugs": {
-    "url": "https://github.com/SproutSeeds/doc-reader/issues"
+    "url": "https://github.com/AaronTateDev/doc-reader/issues"
   },
-  "homepage": "https://github.com/SproutSeeds/doc-reader#readme",
+  "homepage": "https://github.com/AaronTateDev/doc-reader#readme",
   "engines": {
     "node": ">=18"
   },

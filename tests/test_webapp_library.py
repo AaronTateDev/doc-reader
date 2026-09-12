@@ -9,7 +9,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from doc_reader.webapp import INDEX_HTML, ReaderService
+from doc_reader.platform_tools import LOCAL_STT_LABEL, dictation_hotkey_label
+from doc_reader.webapp import INDEX_HTML, SPEECH_BACKENDS, ReaderService
 
 
 class FakeSpeechHandler(BaseHTTPRequestHandler):
@@ -209,7 +210,7 @@ class WebappLibraryTests(unittest.TestCase):
             disabled_status = reader.native_status()
 
             self.assertFalse(disabled_status["stt"]["enabled"])
-            self.assertEqual(disabled_status["stt"]["hotkey"], "Option")
+            self.assertEqual(disabled_status["stt"]["hotkey"], dictation_hotkey_label())
 
     def test_default_tts_backend_is_mac_local(self) -> None:
         old_backend = os.environ.pop("DOC_READER_WEB_SPEECH_BACKEND", None)
@@ -220,7 +221,7 @@ class WebappLibraryTests(unittest.TestCase):
                 status = reader.tts_status()
 
                 self.assertEqual(status["backend"], "local-kokoro")
-                self.assertEqual(status["label"], "Mac Kokoro")
+                self.assertEqual(status["label"], SPEECH_BACKENDS["local-kokoro"])
         finally:
             if old_backend is not None:
                 os.environ["DOC_READER_WEB_SPEECH_BACKEND"] = old_backend
@@ -232,7 +233,7 @@ class WebappLibraryTests(unittest.TestCase):
             status = reader.stt_status()
 
             self.assertEqual(status["backend"], "mac-whisper")
-            self.assertEqual(status["label"], "Mac speech-to-text")
+            self.assertEqual(status["label"], LOCAL_STT_LABEL)
             self.assertTrue(status["ready"])
 
     def test_metrics_split_stt_and_tts_words(self) -> None:
@@ -307,7 +308,7 @@ class WebappLibraryTests(unittest.TestCase):
 
                 status = reader.stt_status()
                 self.assertEqual(status["backend"], "mac-whisper")
-                self.assertEqual(status["label"], "Mac speech-to-text")
+                self.assertEqual(status["label"], LOCAL_STT_LABEL)
                 self.assertTrue(status["ready"])
 
                 result = reader.transcribe_audio_file(
@@ -316,7 +317,7 @@ class WebappLibraryTests(unittest.TestCase):
                     content_type="audio/mp4",
                 )
 
-                self.assertEqual(result["transcription"]["service_label"], "Mac speech-to-text")
+                self.assertEqual(result["transcription"]["service_label"], LOCAL_STT_LABEL)
                 self.assertEqual(FakeSpeechHandler.calls[-1]["path"], "/v1/audio/transcriptions")
         finally:
             if old_umbra is None:

@@ -16,6 +16,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const launcher = join(packageRoot, "run-doc-reader");
+const isWindows = process.platform === "win32";
+const windowsLauncher = join(packageRoot, "run-doc-reader.ps1");
 const managedRoot = join(homedir(), ".doc-reader-managed");
 const nativeApp = join(managedRoot, "Doc Reader.app");
 const nativeExecutable = join(nativeApp, "Contents", "MacOS", "DocReader");
@@ -103,7 +105,68 @@ Document CLI:
   read-docs <file> [options] Stream a document through the local GPU-first reader
   read-docs cli <file> [...] Same as above, explicit CLI form
 
-The polished app integration is macOS-first. On other platforms, use the document CLI.`);
+Windows (run from a source checkout; uses .venv next to bin/):
+  read-docs install          Build the Python env (CUDA PyTorch if NVIDIA), start services
+  read-docs start            Start local Kokoro/Whisper service, web app, tray helper
+  read-docs stop             Stop all Doc Reader processes
+  read-docs restart          Stop then start
+  read-docs status           Show service health (also web-status, tts-status)
+  read-docs doctor           Check Python, CUDA, Kokoro, ffmpeg, espeak, microphone
+  read-docs open             Open the web app, starting services if needed
+  read-docs enable-startup   Launch at login (Startup folder shortcut)
+  read-docs disable-startup  Remove the login shortcut
+  read-docs web              Run the web app in the foreground
+  read-docs tts-local-start  Start only the local speech service (also tts-mac-start)
+
+The macOS app path uses launchd and a native menu-bar app; the Windows path uses
+run-doc-reader.ps1 and a PySide6 tray helper. Linux can use the document CLI.`);
+}
+
+const windowsCommandMap = {
+  install: ["start"],
+  start: ["start"],
+  app: ["start"],
+  "--tray": ["start"],
+  open: ["open"],
+  restart: ["restart"],
+  stop: ["stop"],
+  status: ["status"],
+  doctor: ["doctor"],
+  ensure: ["start", "--no-open"],
+  web: ["run-web"],
+  "web-start": ["web-start"],
+  "web-stop": ["web-stop"],
+  "web-status": ["status"],
+  "tts-local-start": ["tts-start"],
+  "tts-local-stop": ["tts-stop"],
+  "tts-local-status": ["status"],
+  "tts-mac-start": ["tts-start"],
+  "tts-mac-stop": ["tts-stop"],
+  "tts-mac-status": ["status"],
+  "tts-status": ["status"],
+  "enable-startup": ["enable-startup"],
+  "disable-startup": ["disable-startup"],
+  uninstall: ["stop", "--then-disable-startup"],
+  remove: ["stop", "--then-disable-startup"],
+};
+
+function runWindowsLauncher(launcherArgs) {
+  return run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", windowsLauncher, ...launcherArgs], {
+    env: scriptEnv,
+  });
+}
+
+async function runWindowsCommand(commandName, extraArgs = []) {
+  const mapped = windowsCommandMap[commandName];
+  if (!mapped) {
+    return null;
+  }
+  if (mapped[1] === "--then-disable-startup") {
+    const stopCode = await runWindowsLauncher(["stop"]);
+    const disableCode = await runWindowsLauncher(["disable-startup"]);
+    return stopCode || disableCode;
+  }
+  return runWindowsLauncher([...mapped, ...extraArgs]);
 }
 
 function run(command, args, options = {}) {
@@ -1341,6 +1404,9 @@ async function uninstallApp() {
 }
 
 async function runCli(args) {
+  if (isWindows) {
+    return runWindowsLauncher(["cli", ...args]);
+  }
   mkdirSync(dirname(venvDir), { recursive: true });
   const prepareExitCode = await run(launcher, ["--prepare-only"], { env: cliEnv });
   if (prepareExitCode !== 0) {
@@ -1355,7 +1421,14 @@ async function runCli(args) {
 const args = process.argv.slice(2);
 const command = args[0];
 
-if (!command || command === "--help" || command === "-h" || command === "help") {
+let windowsExitCode = null;
+if (isWindows && command && windowsCommandMap[command]) {
+  windowsExitCode = await runWindowsCommand(command, args.slice(1));
+}
+
+if (windowsExitCode !== null) {
+  process.exitCode = windowsExitCode;
+} else if (!command || command === "--help" || command === "-h" || command === "help") {
   usage();
   process.exitCode = 0;
 } else if (command === "install") {

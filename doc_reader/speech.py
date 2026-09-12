@@ -11,6 +11,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol
 
+from .platform_tools import LOCAL_KOKORO_LABEL, find_audio_player, popen_hidden_kwargs
+
 
 class Speaker(Protocol):
     def set_rate(self, rate: int) -> None:
@@ -257,15 +259,7 @@ class OpenAITTSSpeaker:
         )
 
     def _resolve_player(self) -> list[str]:
-        afplay = shutil.which("afplay")
-        if afplay:
-            return [afplay]
-
-        ffplay = shutil.which("ffplay")
-        if ffplay:
-            return [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet"]
-
-        raise RuntimeError("No audio player found. Install ffplay or use macOS afplay.")
+        return find_audio_player()
 
     def set_rate(self, rate: int) -> None:
         speed = _speed_for_rate(rate)
@@ -353,7 +347,7 @@ class OpenAITTSSpeaker:
                 handle.write(audio)
 
             command = [*self._player, temp_audio_path]
-            self._active = subprocess.Popen(command)
+            self._active = subprocess.Popen(command, **popen_hidden_kwargs())
             return_code = self._active.wait()
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, command)
@@ -412,15 +406,7 @@ class HttpTTSSpeaker:
         )
 
     def _resolve_player(self) -> list[str]:
-        afplay = shutil.which("afplay")
-        if afplay:
-            return [afplay]
-
-        ffplay = shutil.which("ffplay")
-        if ffplay:
-            return [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet"]
-
-        raise RuntimeError("No audio player found. Install ffplay or use macOS afplay.")
+        return find_audio_player()
 
     def set_rate(self, rate: int) -> None:
         speed = _speed_for_rate(rate)
@@ -490,7 +476,7 @@ class HttpTTSSpeaker:
                 handle.write(audio)
 
             command = [*self._player, temp_audio_path]
-            self._active = subprocess.Popen(command)
+            self._active = subprocess.Popen(command, **popen_hidden_kwargs())
             return_code = self._active.wait()
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, command)
@@ -923,7 +909,7 @@ def build_speaker(
 def _auto_http_speakers(*, voice_hint: str | None, rate: int) -> list[tuple[str, Speaker]]:
     return [
         (
-            "Mac Kokoro",
+            LOCAL_KOKORO_LABEL,
             HttpTTSSpeaker(
                 base_url=_env("DOC_READER_TTS_MAC_URL", DEFAULT_TTS_MAC_URL),
                 engine="kokoro",

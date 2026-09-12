@@ -6,8 +6,10 @@
 
 Maintained by SproutSeeds. Research stewardship: Fractal Research Group ([frg.earth](https://frg.earth)).
 
-A macOS-first, local-first speech workspace for reading documents, capturing
-dictation, and keeping the resulting material organized in one local Library.
+A local-first speech workspace for reading documents, capturing dictation, and
+keeping the resulting material organized in one local Library. It runs on macOS
+(native menu-bar app) and on Windows (tray helper, this fork), with Kokoro
+text-to-speech and Whisper speech-to-text running entirely on your own machine.
 
 It streams `.pdf`, `.docx`, `.txt`, and `.md` files through local neural TTS,
 reads highlighted text with Right Command or Command-L, captures Option-key
@@ -31,12 +33,79 @@ continuous by preparing later chunks in the background.
 
 ## Platform support
 
-The app experience is macOS-first. The menu-bar app, login agent, global selection
-hotkey, and right-click Services integration are macOS features.
+- **macOS**: menu-bar app, login agent, Right Command / Command-L selection
+  hotkey, Option hold-to-dictate, and the right-click Services item.
+- **Windows 10/11**: system-tray helper, Ctrl+Alt+R selection hotkey, Right Ctrl
+  hold-to-dictate, login startup shortcut, and the same local web app. Kokoro and
+  Whisper run on an NVIDIA GPU through CUDA when one is present, otherwise on CPU.
+- **Linux**: the document CLI works with the same Python engine; the tray helper
+  and service orchestration are not packaged.
 
-The document reader engine is still a Python CLI and may work on Linux or Windows
-with compatible speech dependencies, but the packaged app workflow is supported on
-macOS.
+## Quick start: Windows
+
+Everything runs locally on your PC: the Kokoro speech service, Whisper
+speech-to-text, the web app, and a tray helper for hotkeys and dictation.
+
+Prerequisites (one time):
+
+```powershell
+winget install astral-sh.uv          # creates the Python 3.12 environment
+winget install Gyan.FFmpeg           # audio playback (ffplay) and dictation audio cleanup
+winget install eSpeak-NG.eSpeak-NG   # optional: Kokoro bundles its own espeak-ng
+```
+
+Clone this repository, then from the checkout folder:
+
+```powershell
+.\run-doc-reader.cmd
+```
+
+The first run builds `.venv` (PyTorch with CUDA 12.4 when an NVIDIA GPU is
+detected, otherwise the CPU build), installs Kokoro, faster-whisper, PySide6,
+pynput, and sounddevice, starts the three background processes, and opens
+`http://127.0.0.1:8766`. The first Kokoro and Whisper model downloads take a
+minute or two; the web page shows `local-kokoro online` once speech is ready.
+
+Useful commands:
+
+```powershell
+.\run-doc-reader.cmd status          # service health, GPU in use, helper state
+.\run-doc-reader.cmd stop
+.\run-doc-reader.cmd restart
+.\run-doc-reader.cmd doctor          # Python, CUDA, Kokoro, ffmpeg, espeak, microphone checks
+.\run-doc-reader.cmd enable-startup  # launch at login
+.\run-doc-reader.cmd disable-startup
+.\run-doc-reader.cmd cli .\paper.pdf --mode smart   # command-line reader
+```
+
+`npm install -g` users get the same commands through `read-docs start`,
+`read-docs stop`, `read-docs status`, `read-docs doctor`, and `read-docs
+enable-startup` when run from a checkout on Windows.
+
+What the tray helper gives you on Windows:
+
+- **Read highlighted text**: select text in any app and press `Ctrl+Alt+R`. The
+  helper copies the selection (restoring your clipboard afterwards), sends it to
+  the web app, and playback starts through Local Kokoro.
+- **Dictation**: put the cursor in a text field and hold `Right Ctrl`. A small
+  HUD shows while recording; release the key and the audio goes to local Whisper,
+  the text is pasted at the cursor, and a `Dictation` card lands in the Library.
+- **Tray menu**: Open Doc Reader, Read Selection, Read Clipboard, Pause/Resume,
+  Stop, toggle dictation, Quit.
+
+Override the keys with environment variables before starting:
+
+```powershell
+$env:DOC_READER_SELECTION_SHORTCUT = "<ctrl>+<shift>+r"
+$env:DOC_READER_DICTATION_KEY = "f8"        # any pynput key name: ctrl_r, alt_r, scroll_lock, f9...
+$env:DOC_READER_STT_MODEL = "medium"        # Whisper size: tiny, base, small (default), medium, large-v3
+.\run-doc-reader.cmd restart
+```
+
+Data, logs, and PID files live in `%USERPROFILE%\.doc-reader-managed`
+(`logs\tts.log`, `logs\web.log`, `logs\helper.log`). The web app listens on
+`127.0.0.1:8766` and the speech service on `127.0.0.1:8772`; both are loopback
+only.
 
 ## Quick start: macOS app
 
