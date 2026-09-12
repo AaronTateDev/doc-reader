@@ -1,10 +1,55 @@
-# read-docs
+# Doc Reader (Windows and macOS fork)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/SproutSeeds/doc-reader/main/docs/readme-animation.svg" alt="Animated Doc Reader workflow showing local-first speech, dictation, the Library, and the Signal Map" width="760">
 </p>
 
-Maintained by SproutSeeds. Research stewardship: Fractal Research Group ([frg.earth](https://frg.earth)).
+> **About this fork.** This is [Aaron Tate's](https://github.com/AaronTateDev)
+> fork of [SproutSeeds/doc-reader](https://github.com/SproutSeeds/doc-reader),
+> the local-first speech workspace written by Cody Mitchell and maintained by
+> SproutSeeds (research stewardship: Fractal Research Group,
+> [frg.earth](https://frg.earth)). The upstream project runs on macOS. This fork
+> adds full Windows support and several web-app features while keeping the
+> macOS app working, so one codebase serves both. It keeps the upstream MIT
+> license and Cody's copyright (see `LICENSE`). Main branch: `windows-support`.
+
+## What Doc Reader does
+
+Doc Reader reads documents and selected text aloud with a neural voice, turns
+your speech into text anywhere you can type, and keeps everything it reads or
+hears as cards in a local Library. Nothing leaves your machine: Kokoro
+text-to-speech and Whisper speech-to-text run locally (on an NVIDIA GPU when
+one is present), and the web page at `http://127.0.0.1:8766` is served from
+your own computer.
+
+- **Read anything**: paste text, import `.pdf`, `.docx`, `.txt`, or `.md`, or
+  highlight text in any app and press the read-selection hotkey.
+- **Dictate anywhere**: hold the dictation key, speak, release; the transcript
+  is pasted at the cursor and saved to the Library.
+- **28 English Kokoro voices**, American and British, with a play-sample button
+  for each; speed control; pause, resume, stop.
+- **Hotkeys you choose**: click a key in Details and press the one you want, or
+  use the one-click presets. Side mouse buttons work for dictation.
+- **Library and Signal map**: search and filter everything you have read or
+  dictated, edit transcripts, and see word counts and topics.
+
+## What this fork adds to the upstream
+
+| Area | Change |
+| --- | --- |
+| Windows port | `run-doc-reader.cmd` launcher, hidden background services, system-tray helper with hotkeys and hold-to-dictate, CUDA or CPU PyTorch install, `doctor` and `status` commands, login startup shortcut |
+| Dictation latency | Pre-armed microphone stream and cached service health checks so dictation starts and ends without the earlier delay |
+| Web page | Content-first workspace redesign (Library, editor, footer controls, Details inspector), dark and light themes, keyboard and screen-reader support |
+| Voices | Kokoro voice picker with all English voices and samples; the chosen voice is used for playback and prepared audio |
+| Hotkeys | Change the dictation key and read-selection shortcut from the page or the tray menu, with rules and plain-language errors; the running helper rebinds without a restart |
+| Reliability | Stopping one Doc Reader instance can no longer kill another instance's processes |
+
+Status: Windows is verified end to end on Windows 11 with an RTX 3080. The
+macOS hotkey changes in `macos/DocReaderApp` were written on Windows and have
+not yet been built or run on a Mac; the checklist is in
+`docs/design-notes/2026-09-12-content-first-workspace.md`.
+
+Maintained upstream by SproutSeeds. Research stewardship: Fractal Research Group ([frg.earth](https://frg.earth)).
 
 A local-first speech workspace for reading documents, capturing dictation, and
 keeping the resulting material organized in one local Library. It runs on macOS
