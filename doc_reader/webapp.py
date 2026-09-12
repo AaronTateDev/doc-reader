@@ -3687,7 +3687,7 @@ INDEX_HTML = r"""<!doctype html>
   <title>Doc Reader</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&display=swap">
   <style>
     :root {
       color-scheme: light dark;
@@ -3707,8 +3707,9 @@ INDEX_HTML = r"""<!doctype html>
       --warn: #a83a2a;
       --shadow: 0 1px 2px rgba(20, 26, 23, 0.06), 0 8px 24px -16px rgba(20, 26, 23, 0.25);
       --font-display: "Bricolage Grotesque", "Segoe UI Variable Display", "Segoe UI", -apple-system, sans-serif;
-      --font-body: "Instrument Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
-      --font-mono: "IBM Plex Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+      --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto, sans-serif;
+      --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+      --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
     }
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) {
@@ -3763,37 +3764,45 @@ INDEX_HTML = r"""<!doctype html>
 
     /* ---------------------------------------------------------------- header */
     header {
+      position: sticky;
+      top: 0;
+      z-index: 5;
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       justify-content: space-between;
       gap: 16px;
-      margin-bottom: 22px;
-      padding-bottom: 14px;
-      border-bottom: 1px solid var(--line);
+      margin: 0 -28px 20px;
+      padding: 14px 28px;
+      background: color-mix(in srgb, var(--bg) 78%, transparent);
+      -webkit-backdrop-filter: blur(18px) saturate(160%);
+      backdrop-filter: blur(18px) saturate(160%);
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+    }
+    @media (prefers-reduced-transparency: reduce) {
+      header {
+        background: var(--bg);
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+      }
     }
     .brand {
-      display: grid;
-      gap: 2px;
-    }
-    .eyebrow {
-      font: 500 11px/1 var(--font-mono);
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--muted);
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      min-width: 0;
     }
     h1 {
-      font: 600 26px/1.05 var(--font-display);
+      font: 600 24px/1.05 var(--font-display);
       font-variation-settings: "opsz" 40;
-      letter-spacing: -0.01em;
+      letter-spacing: -0.02em;
       margin: 0;
       text-wrap: balance;
     }
     h2 {
-      font: 500 11px/1.2 var(--font-mono);
+      font: 600 13px/1.25 var(--font-body);
       margin: 0;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--muted);
+      letter-spacing: 0;
+      color: var(--ink);
     }
     .status-wrap {
       display: flex;
@@ -3827,7 +3836,8 @@ INDEX_HTML = r"""<!doctype html>
       body[data-state="reading"] .status-dot { animation: none; }
     }
     .status {
-      font: 12.5px/1.35 var(--font-mono);
+      font: 12.5px/1.35 var(--font-body);
+      font-variant-numeric: tabular-nums;
       color: var(--muted);
       text-align: right;
       overflow: hidden;
@@ -3859,11 +3869,15 @@ INDEX_HTML = r"""<!doctype html>
     /* ---------------------------------------------------------------- fields */
     label {
       display: block;
-      font: 500 11px/1.2 var(--font-mono);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
+      font: 500 12.5px/1.25 var(--font-body);
+      letter-spacing: 0;
       color: var(--muted);
       margin-bottom: 6px;
+    }
+    .rule {
+      border: 0;
+      border-top: 1px solid var(--line);
+      margin: 2px 0;
     }
     textarea, select, .library-search {
       width: 100%;
@@ -3911,7 +3925,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     .range-head label { margin-bottom: 0; }
     .range-value {
-      font: 12px/1 var(--font-mono);
+      font: 500 12.5px/1 var(--font-body);
       font-variant-numeric: tabular-nums;
       color: var(--ink);
       white-space: nowrap;
@@ -3935,7 +3949,10 @@ INDEX_HTML = r"""<!doctype html>
       margin-right: 10px;
       cursor: pointer;
     }
-    input[type="file"]::file-selector-button:hover { border-color: var(--line-strong); }
+    input[type="file"]::file-selector-button:active { transform: scale(0.97); }
+    @media (hover: hover) and (pointer: fine) {
+      input[type="file"]::file-selector-button:hover { border-color: var(--line-strong); }
+    }
     .audio-upload-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -3953,8 +3970,6 @@ INDEX_HTML = r"""<!doctype html>
       margin: 0;
       color: var(--ink);
       font: 500 13px/1.2 var(--font-body);
-      letter-spacing: 0;
-      text-transform: none;
     }
     input[type="checkbox"] {
       width: 15px;
@@ -3983,7 +3998,8 @@ INDEX_HTML = r"""<!doctype html>
       background: var(--live-soft);
     }
     .voice-status {
-      font: 11.5px/1.45 var(--font-mono);
+      font: 12px/1.45 var(--font-body);
+      font-variant-numeric: tabular-nums;
       color: var(--muted);
       min-height: 17px;
       margin-top: 5px;
@@ -4000,17 +4016,22 @@ INDEX_HTML = r"""<!doctype html>
       font: 500 13px/1.2 var(--font-body);
       min-height: 35px;
       cursor: pointer;
-      transition: border-color 140ms ease, background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+      transition: transform 120ms var(--ease-out), border-color 140ms ease, background 140ms ease, color 140ms ease, box-shadow 140ms ease;
     }
-    button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--panel-2); }
+    button:active:not(:disabled) { transform: scale(0.97); }
+    @media (hover: hover) and (pointer: fine) {
+      button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--panel-2); }
+    }
     button.primary {
       background: var(--accent);
       color: var(--accent-ink);
       border-color: var(--accent);
     }
-    button.primary:hover:not(:disabled) {
-      background: color-mix(in srgb, var(--accent) 88%, var(--ink));
-      border-color: color-mix(in srgb, var(--accent) 88%, var(--ink));
+    @media (hover: hover) and (pointer: fine) {
+      button.primary:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--accent) 88%, var(--ink));
+        border-color: color-mix(in srgb, var(--accent) 88%, var(--ink));
+      }
     }
     button:disabled { cursor: default; opacity: 0.5; }
     button.icon-button {
@@ -4043,24 +4064,27 @@ INDEX_HTML = r"""<!doctype html>
       grid-template-columns: repeat(4, minmax(0, 1fr));
       border: 1px solid var(--line);
       border-radius: 10px;
-      overflow: hidden;
-      background: var(--panel);
+      background: var(--panel-2);
       padding: 3px;
-      gap: 3px;
+      gap: 2px;
     }
     .view-toggle button {
       border: 0;
       border-radius: 7px;
-      min-height: 34px;
+      min-height: 32px;
       background: transparent;
       color: var(--muted);
       font-variant-numeric: tabular-nums;
+      transition: transform 120ms var(--ease-out), background 150ms var(--ease-out), color 150ms ease, box-shadow 150ms ease;
     }
-    .view-toggle button:hover:not(:disabled) { background: var(--panel-2); color: var(--ink); }
+    @media (hover: hover) and (pointer: fine) {
+      .view-toggle button:hover:not(:disabled):not(.active) { color: var(--ink); }
+    }
     .view-toggle button.active {
-      background: var(--accent-soft);
-      color: var(--accent);
+      background: var(--panel);
+      color: var(--ink);
       font-weight: 600;
+      box-shadow: 0 1px 2px rgba(20, 26, 23, 0.10), 0 0 0 1px color-mix(in srgb, var(--line) 80%, transparent);
     }
     .signal-panel {
       display: grid;
@@ -4098,9 +4122,9 @@ INDEX_HTML = r"""<!doctype html>
     .topic-pill {
       border: 1px solid var(--line);
       border-radius: 999px;
-      padding: 3px 9px;
+      padding: 3px 10px;
       color: var(--muted);
-      font: 11.5px/1.3 var(--font-mono);
+      font: 12px/1.3 var(--font-body);
       font-variant-numeric: tabular-nums;
       background: var(--panel-2);
     }
@@ -4116,7 +4140,7 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--ink);
     }
     .count {
-      font: 12px/1 var(--font-mono);
+      font: 12.5px/1 var(--font-body);
       font-variant-numeric: tabular-nums;
       color: var(--muted);
     }
@@ -4154,6 +4178,7 @@ INDEX_HTML = r"""<!doctype html>
       border-radius: 0 3px 3px 0;
       background: transparent;
     }
+    .card { transition: background 150ms var(--ease-out); }
     .card.active { background: color-mix(in srgb, var(--accent-soft) 45%, var(--panel)); }
     .card.active::before { background: var(--accent); }
     .card-top {
@@ -4180,7 +4205,7 @@ INDEX_HTML = r"""<!doctype html>
       overflow-wrap: anywhere;
     }
     .meta {
-      font: 11.5px/1.4 var(--font-mono);
+      font: 12px/1.4 var(--font-body);
       font-variant-numeric: tabular-nums;
     }
     .snippet { line-height: 1.5; }
@@ -4211,6 +4236,7 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 12.5px;
       min-height: 18px;
     }
+    .error:empty { display: none; }
 
     /* ---------------------------------------------------------------- microphone */
     .mic-meter {
@@ -4240,7 +4266,8 @@ INDEX_HTML = r"""<!doctype html>
       padding: 10px 12px;
       background: var(--live-soft);
       color: var(--muted);
-      font: 12px/1.45 var(--font-mono);
+      font: 12px/1.45 var(--font-body);
+      font-variant-numeric: tabular-nums;
     }
     .recording-debug[hidden] { display: none; }
     .recording-debug strong {
@@ -4251,9 +4278,16 @@ INDEX_HTML = r"""<!doctype html>
 
     [hidden] { display: none !important; }
 
+    @media (prefers-contrast: more) {
+      .panel, .history, .view-toggle, textarea, select, .library-search, button, input[type="file"] {
+        border-color: var(--ink);
+      }
+      header { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
+    }
+
     @media (max-width: 860px) {
       main { padding: 18px 16px 40px; }
-      header { align-items: flex-start; flex-direction: column; gap: 10px; }
+      header { align-items: flex-start; flex-direction: column; gap: 8px; margin: 0 -16px 16px; padding: 12px 16px; }
       .status-wrap { max-width: 100%; }
       .status { text-align: left; white-space: normal; }
       .grid { grid-template-columns: 1fr; }
@@ -4267,7 +4301,6 @@ INDEX_HTML = r"""<!doctype html>
   <main>
     <header>
       <div class="brand">
-        <div class="eyebrow">Local speech workstation</div>
         <h1>Doc Reader</h1>
       </div>
       <div class="status-wrap">
@@ -4296,6 +4329,13 @@ INDEX_HTML = r"""<!doctype html>
           <label for="text">Text</label>
           <textarea id="text" placeholder="Paste or type anything to hear it read aloud."></textarea>
         </div>
+        <div class="row actions">
+          <button class="primary" id="readText">Read text</button>
+          <button id="pause">Pause</button>
+          <button id="stop">Stop</button>
+        </div>
+        <div class="error" id="error"></div>
+        <hr class="rule">
         <div>
           <label for="voice">Voice</label>
           <select id="voice"></select>
@@ -4303,20 +4343,21 @@ INDEX_HTML = r"""<!doctype html>
         </div>
         <div>
           <div class="range-head">
-            <label for="readRate">Read Speed</label>
+            <label for="readRate">Read speed</label>
             <output class="range-value" id="readRateValue" for="readRate">180 WPM / 1.00x</output>
           </div>
           <input id="readRate" type="range" min="90" max="300" step="5" value="180">
         </div>
+        <hr class="rule">
         <div>
           <div class="row service-row">
             <div class="check-row">
               <input id="dictationEnabled" type="checkbox">
-              <label for="dictationEnabled">Speech-to-text</label>
+              <label for="dictationEnabled">Dictation</label>
             </div>
             <div class="service-actions">
-              <button id="nativeHelperToggle" class="service-toggle" type="button">Start Helper</button>
-              <button id="nativeHelperReset" class="service-reset" type="button" title="Restart the native hotkey helper">Reset</button>
+              <button id="nativeHelperToggle" class="service-toggle" type="button">Start helper</button>
+              <button id="nativeHelperReset" class="service-reset" type="button" title="Restart the hotkey helper">Reset</button>
             </div>
           </div>
           <div class="voice-status" id="dictationStatus"></div>
@@ -4328,16 +4369,10 @@ INDEX_HTML = r"""<!doctype html>
           <div class="voice-status" id="microphoneStatus"></div>
         </div>
         <div class="recording-debug" id="dictationRecordingDebug" hidden>
-          <strong>Latest Recording</strong>
+          <strong>Latest recording</strong>
           <div id="dictationRecordingStatus"></div>
           <audio id="dictationRecordingAudio" controls preload="none"></audio>
         </div>
-        <div class="row actions">
-          <button class="primary" id="readText">Read Text</button>
-          <button id="pause">Pause</button>
-          <button id="stop">Stop</button>
-        </div>
-        <div class="error" id="error"></div>
       </section>
       <section class="list-column">
         <div class="view-toggle" role="tablist" aria-label="History view">
@@ -4348,7 +4383,7 @@ INDEX_HTML = r"""<!doctype html>
         </div>
         <div class="panel signal-panel">
           <div class="list-header">
-            <h2>Signal Map</h2>
+            <h2>Signal map</h2>
             <button id="runAnalysis" type="button">Analyze</button>
           </div>
           <div class="metric-grid">
