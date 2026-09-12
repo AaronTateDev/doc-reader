@@ -93,7 +93,15 @@ What the tray helper gives you on Windows:
 - **Tray menu**: Open Doc Reader, Read Selection, Read Clipboard, Pause/Resume,
   Stop, toggle dictation, Quit.
 
-Override the keys with environment variables before starting:
+Change the keys from the web page: open **Details**, and under **Dictation**
+pick a chip for the dictation key (Right Ctrl, Right Alt, Right Shift, F8, F9,
+Scroll Lock, Pause) or the read-selection shortcut (Ctrl+Alt+R, Ctrl+Shift+R,
+Ctrl+Alt+S, Alt+Shift+R, Ctrl+Alt+Space). The tray menu has the same lists
+under **Hotkeys**. The running helper switches within a couple of seconds, no
+restart needed, and the choice is saved with the other web settings.
+
+Environment variables still work as the fallback default when nothing has been
+picked in the page:
 
 ```powershell
 $env:DOC_READER_SELECTION_SHORTCUT = "<ctrl>+<shift>+r"

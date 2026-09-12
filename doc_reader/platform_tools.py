@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,30 +23,78 @@ DEFAULT_WINDOWS_DICTATION_KEY = "ctrl_r"
 DEFAULT_WINDOWS_SELECTION_HOTKEY = "<ctrl>+<alt>+r"
 
 
-def dictation_hotkey_label() -> str:
+# Quick-swap presets offered in the web page and the tray menu (pynput names).
+DICTATION_KEY_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("ctrl_r", "Right Ctrl"),
+    ("alt_r", "Right Alt"),
+    ("shift_r", "Right Shift"),
+    ("f8", "F8"),
+    ("f9", "F9"),
+    ("scroll_lock", "Scroll Lock"),
+    ("pause", "Pause"),
+)
+SELECTION_SHORTCUT_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("<ctrl>+<alt>+r", "Ctrl+Alt+R"),
+    ("<ctrl>+<shift>+r", "Ctrl+Shift+R"),
+    ("<ctrl>+<alt>+s", "Ctrl+Alt+S"),
+    ("<alt>+<shift>+r", "Alt+Shift+R"),
+    ("<ctrl>+<alt>+<space>", "Ctrl+Alt+Space"),
+)
+_DICTATION_KEY_LABELS = {
+    "ctrl_r": "Right Ctrl",
+    "ctrl_l": "Left Ctrl",
+    "alt_r": "Right Alt",
+    "alt_l": "Left Alt",
+    "alt": "Alt",
+    "shift_r": "Right Shift",
+    "scroll_lock": "Scroll Lock",
+    "pause": "Pause",
+    "f8": "F8",
+    "f9": "F9",
+}
+_DICTATION_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_SELECTION_SHORTCUT_RE = re.compile(r"^(<(ctrl|alt|shift|cmd)>\+){1,3}(<[a-z_0-9]+>|[a-z0-9])$")
+
+
+def default_dictation_key() -> str:
+    return os.getenv("DOC_READER_DICTATION_KEY", DEFAULT_WINDOWS_DICTATION_KEY).strip().lower() or DEFAULT_WINDOWS_DICTATION_KEY
+
+
+def default_selection_shortcut() -> str:
+    return os.getenv("DOC_READER_SELECTION_SHORTCUT", DEFAULT_WINDOWS_SELECTION_HOTKEY).strip().lower() or DEFAULT_WINDOWS_SELECTION_HOTKEY
+
+
+def normalize_dictation_key(value: object) -> str:
+    """Return a safe pynput key name, or an empty string when the value is not one."""
+    candidate = str(value or "").strip().lower()
+    return candidate if _DICTATION_KEY_RE.match(candidate) else ""
+
+
+def normalize_selection_shortcut(value: object) -> str:
+    """Return a safe pynput chord such as ``<ctrl>+<alt>+r``, or an empty string."""
+    candidate = str(value or "").strip().lower().replace(" ", "")
+    return candidate if _SELECTION_SHORTCUT_RE.match(candidate) else ""
+
+
+def dictation_hotkey_label(key: str | None = None) -> str:
     if IS_MACOS:
         return "Option"
-    key = os.getenv("DOC_READER_DICTATION_KEY", DEFAULT_WINDOWS_DICTATION_KEY).strip().lower()
-    labels = {
-        "ctrl_r": "Right Ctrl",
-        "ctrl_l": "Left Ctrl",
-        "alt_r": "Right Alt",
-        "alt_l": "Left Alt",
-        "alt": "Alt",
-        "shift_r": "Right Shift",
-        "scroll_lock": "Scroll Lock",
-        "pause": "Pause",
-        "f8": "F8",
-        "f9": "F9",
-    }
-    return labels.get(key, key.replace("_", " ").title())
+    name = (key or default_dictation_key()).strip().lower()
+    return _DICTATION_KEY_LABELS.get(name, name.replace("_", " ").title())
 
 
-def selection_hotkey_label() -> str:
+def selection_hotkey_label(shortcut: str | None = None) -> str:
     if IS_MACOS:
         return "Control+Option+Command+R"
-    hotkey = os.getenv("DOC_READER_SELECTION_SHORTCUT", DEFAULT_WINDOWS_SELECTION_HOTKEY)
+    hotkey = shortcut or default_selection_shortcut()
     return "+".join(part.strip("<>").title() for part in hotkey.split("+"))
+
+
+def hotkey_options() -> dict[str, list[dict[str, str]]]:
+    return {
+        "dictation": [{"value": value, "label": label} for value, label in DICTATION_KEY_OPTIONS],
+        "selection": [{"value": value, "label": label} for value, label in SELECTION_SHORTCUT_OPTIONS],
+    }
 
 
 def _windows_tool_candidates(name: str) -> list[str]:

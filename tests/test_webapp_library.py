@@ -552,3 +552,43 @@ class KokoroVoicePickerTests(unittest.TestCase):
         self.assertEqual(call["payload"]["voice"], "am_michael")
         with self.assertRaises(ValueError):
             _voice_preview_audio("not a voice")
+
+
+class HotkeySwapTests(unittest.TestCase):
+    setUp = WebappLibraryTests.setUp
+    tearDown = WebappLibraryTests.tearDown
+
+    def test_page_offers_hotkey_chips(self) -> None:
+        self.assertIn('id="dictationKeyChips"', INDEX_HTML)
+        self.assertIn('id="selectionKeyChips"', INDEX_HTML)
+        self.assertIn("Read selection", INDEX_HTML)
+
+    def test_state_lists_hotkey_presets_with_current_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reader = ReaderService(Path(directory))
+            hotkeys = reader.state()["stt"]["hotkeys"]
+            self.assertEqual(hotkeys["dictation_key"], "ctrl_r")
+            self.assertEqual(hotkeys["selection_shortcut"], "<ctrl>+<alt>+r")
+            self.assertIn({"value": "f8", "label": "F8"}, hotkeys["dictation_options"])
+            self.assertIn({"value": "<ctrl>+<shift>+r", "label": "Ctrl+Shift+R"}, hotkeys["selection_options"])
+
+    def test_hotkey_choice_persists_and_updates_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reader = ReaderService(Path(directory))
+            reader.update_settings({"dictation_key": "F8", "selection_shortcut": "<ctrl>+<shift>+r"})
+            status = reader.native_status()
+            self.assertEqual(status["stt"]["hotkeys"]["dictation_key"], "f8")
+            self.assertEqual(status["stt"]["hotkey"], "F8")
+            self.assertEqual(status["stt"]["hotkeys"]["selection_label"], "Ctrl+Shift+R")
+            again = ReaderService(Path(directory)).state()["stt"]["hotkeys"]
+            self.assertEqual(again["selection_shortcut"], "<ctrl>+<shift>+r")
+
+    def test_bad_hotkeys_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reader = ReaderService(Path(directory))
+            for bad in ("", "rm -rf", "../x", "<ctrl>+"):
+                with self.assertRaises(ValueError):
+                    reader.update_settings({"dictation_key": bad})
+                with self.assertRaises(ValueError):
+                    reader.update_settings({"selection_shortcut": bad})
+            self.assertEqual(reader.state()["stt"]["hotkeys"]["dictation_key"], "ctrl_r")

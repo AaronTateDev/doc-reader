@@ -31,7 +31,10 @@ from .platform_tools import (
     DEFAULT_WINDOWS_SELECTION_HOTKEY,
     IS_WINDOWS,
     dictation_hotkey_label,
+    hotkey_options,
     managed_root,
+    normalize_dictation_key,
+    normalize_selection_shortcut,
     pid_is_running,
     selection_hotkey_label,
 )
@@ -403,7 +406,7 @@ def main() -> int:
         return 1
     try:
         from PySide6.QtCore import QObject, Qt, QTimer, Signal
-        from PySide6.QtGui import QAction, QFont
+        from PySide6.QtGui import QAction, QActionGroup, QFont
         from PySide6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon
         from pynput import keyboard
     except ModuleNotFoundError as exc:
@@ -436,6 +439,7 @@ def main() -> int:
         statusText = Signal(str)
         hudText = Signal(str)
         stateUpdated = Signal(dict)
+        hotkeysChanged = Signal(dict)
 
     bridge = Bridge()
     prearm = os.getenv("DOC_READER_DICTATION_PREARM", "1").strip().lower() not in {"0", "false", "no", "off"}
@@ -496,6 +500,36 @@ def main() -> int:
     dictation_action = QAction(f"Dictation: hold {dictation_hotkey_label()}", menu)
     dictation_action.setCheckable(True)
     dictation_action.setChecked(True)
+    hotkeys_menu = QMenu("Hotkeys", menu)
+    dictation_key_menu = hotkeys_menu.addMenu("Dictation key")
+    selection_key_menu = hotkeys_menu.addMenu("Read selection")
+    dictation_key_group = QActionGroup(menu)
+    selection_key_group = QActionGroup(menu)
+    hotkey_actions: dict[str, dict[str, QAction]] = {"dictation": {}, "selection": {}}
+
+    def _save_hotkey(field: str, value: str) -> None:
+        def run() -> None:
+            try:
+                _request_json("/api/settings", payload={field: value}, timeout=3.0)
+            except Exception as exc:  # noqa: BLE001
+                bridge.statusText.emit(f"Could not save hotkey: {exc}")
+
+        threading.Thread(target=run, name="doc-reader-hotkey-save", daemon=True).start()
+
+    for option in hotkey_options()["dictation"]:
+        action = QAction(option["label"], dictation_key_menu)
+        action.setCheckable(True)
+        action.triggered.connect(lambda _checked=False, value=option["value"]: _save_hotkey("dictation_key", value))
+        dictation_key_group.addAction(action)
+        dictation_key_menu.addAction(action)
+        hotkey_actions["dictation"][option["value"]] = action
+    for option in hotkey_options()["selection"]:
+        action = QAction(option["label"], selection_key_menu)
+        action.setCheckable(True)
+        action.triggered.connect(lambda _checked=False, value=option["value"]: _save_hotkey("selection_shortcut", value))
+        selection_key_group.addAction(action)
+        selection_key_menu.addAction(action)
+        hotkey_actions["selection"][option["value"]] = action
     status_action = QAction("Starting...", menu)
     status_action.setEnabled(False)
     quit_action = QAction("Quit Helper", menu)
@@ -506,6 +540,7 @@ def main() -> int:
     menu.addAction(stop_action)
     menu.addSeparator()
     menu.addAction(dictation_action)
+    menu.addMenu(hotkeys_menu)
     menu.addAction(status_action)
     menu.addSeparator()
     menu.addAction(quit_action)
@@ -718,12 +753,6 @@ def main() -> int:
     bridge.transcriptReady.connect(on_transcript_ready)
 
     # ---------------------------------------------------------- keyboard listener
-    try:
-        dictation_key = _parse_key(DICTATION_KEY_NAME)
-    except ValueError as exc:
-        print(f"[doc-reader] {exc}; falling back to {DEFAULT_WINDOWS_DICTATION_KEY}")
-        dictation_key = _parse_key(DEFAULT_WINDOWS_DICTATION_KEY)
-
     hotkey_state = {"dictation_down": False, "last_selection": 0.0}
 
     def on_hotkey() -> None:
@@ -733,10 +762,48 @@ def main() -> int:
         hotkey_state["last_selection"] = now
         bridge.selectionRequested.emit()
 
-    try:
-        selection_hotkey = keyboard.HotKey(keyboard.HotKey.parse(SELECTION_HOTKEY), on_hotkey)
-    except ValueError:
-        selection_hotkey = keyboard.HotKey(keyboard.HotKey.parse(DEFAULT_WINDOWS_SELECTION_HOTKEY), on_hotkey)
+    # The bindings live in a dict so the heartbeat can swap them without restarting
+    # the listener when the web page or tray menu picks a different key.
+    bindings: dict[str, Any] = {"dictation_name": "", "selection_name": "", "dictation": None, "selection": None}
+
+    def apply_hotkeys(dictation_name: str, selection_name: str) -> bool:
+        changed = False
+        dictation_name = normalize_dictation_key(dictation_name) or DEFAULT_WINDOWS_DICTATION_KEY
+        selection_name = normalize_selection_shortcut(selection_name) or DEFAULT_WINDOWS_SELECTION_HOTKEY
+        if dictation_name != bindings["dictation_name"]:
+            try:
+                bindings["dictation"] = _parse_key(dictation_name)
+            except ValueError as exc:
+                print(f"[doc-reader] {exc}; falling back to {DEFAULT_WINDOWS_DICTATION_KEY}", flush=True)
+                dictation_name = DEFAULT_WINDOWS_DICTATION_KEY
+                bindings["dictation"] = _parse_key(dictation_name)
+            bindings["dictation_name"] = dictation_name
+            changed = True
+        if selection_name != bindings["selection_name"]:
+            try:
+                bindings["selection"] = keyboard.HotKey(keyboard.HotKey.parse(selection_name), on_hotkey)
+            except ValueError as exc:
+                print(f"[doc-reader] {exc}; falling back to {DEFAULT_WINDOWS_SELECTION_HOTKEY}", flush=True)
+                selection_name = DEFAULT_WINDOWS_SELECTION_HOTKEY
+                bindings["selection"] = keyboard.HotKey(keyboard.HotKey.parse(selection_name), on_hotkey)
+            bindings["selection_name"] = selection_name
+            changed = True
+        return changed
+
+    apply_hotkeys(DICTATION_KEY_NAME, SELECTION_HOTKEY)
+
+    def on_hotkeys_changed(payload: dict) -> None:
+        dictation_name = str(payload.get("dictation_key") or bindings["dictation_name"])
+        selection_name = str(payload.get("selection_shortcut") or bindings["selection_name"])
+        selection_action.setText(f"Read Selection ({selection_hotkey_label(selection_name)})")
+        dictation_action.setText(f"Dictation: hold {dictation_hotkey_label(dictation_name)}")
+        for value, action in hotkey_actions["dictation"].items():
+            action.setChecked(value == dictation_name)
+        for value, action in hotkey_actions["selection"].items():
+            action.setChecked(value == selection_name)
+
+    bridge.hotkeysChanged.connect(on_hotkeys_changed)
+    bridge.hotkeysChanged.emit({"dictation_key": bindings["dictation_name"], "selection_shortcut": bindings["selection_name"]})
 
     listener_holder: dict[str, Any] = {}
 
@@ -748,10 +815,10 @@ def main() -> int:
         with _pressed_lock:
             _pressed_keys.add(key)
         try:
-            selection_hotkey.press(canonical(key))
+            bindings["selection"].press(canonical(key))
         except Exception:  # noqa: BLE001
             pass
-        if key == dictation_key and not hotkey_state["dictation_down"]:
+        if key == bindings["dictation"] and not hotkey_state["dictation_down"]:
             hotkey_state["dictation_down"] = True
             bridge.dictationStarted.emit()
 
@@ -759,10 +826,10 @@ def main() -> int:
         with _pressed_lock:
             _pressed_keys.discard(key)
         try:
-            selection_hotkey.release(canonical(key))
+            bindings["selection"].release(canonical(key))
         except Exception:  # noqa: BLE001
             pass
-        if key == dictation_key and hotkey_state["dictation_down"]:
+        if key == bindings["dictation"] and hotkey_state["dictation_down"]:
             hotkey_state["dictation_down"] = False
             bridge.dictationStopped.emit()
 
@@ -818,6 +885,17 @@ def main() -> int:
                 state["running"] = bool(status.get("running"))
                 state["paused"] = bool(status.get("paused"))
                 state["active_id"] = str(status.get("active_id") or "")
+                hotkeys = stt.get("hotkeys") if isinstance(stt.get("hotkeys"), dict) else {}
+                if hotkeys and apply_hotkeys(str(hotkeys.get("dictation_key") or ""), str(hotkeys.get("selection_shortcut") or "")):
+                    bridge.hotkeysChanged.emit({
+                        "dictation_key": bindings["dictation_name"],
+                        "selection_shortcut": bindings["selection_name"],
+                    })
+                    print(
+                        f"[doc-reader] Hotkeys now: read selection {selection_hotkey_label(bindings['selection_name'])}, "
+                        f"dictation hold {dictation_hotkey_label(bindings['dictation_name'])}.",
+                        flush=True,
+                    )
                 # Keep the microphone stream open (idle) so the dictation key starts
                 # capturing immediately instead of waiting for the device to open.
                 if recorder.prearm and state["stt_enabled"]:

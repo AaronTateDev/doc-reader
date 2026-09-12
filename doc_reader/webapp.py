@@ -43,7 +43,13 @@ from .platform_tools import (
     IS_WINDOWS,
     LOCAL_KOKORO_LABEL,
     LOCAL_STT_LABEL,
+    default_dictation_key,
+    default_selection_shortcut,
     dictation_hotkey_label,
+    hotkey_options,
+    normalize_dictation_key,
+    normalize_selection_shortcut,
+    selection_hotkey_label,
     find_tool,
     kill_process_tree,
     popen_process_group_kwargs,
@@ -322,7 +328,8 @@ class ReaderService:
             "active_id": self._active_id or self._paused_id,
             "stt": {
                 "enabled": self._stt_enabled(),
-                "hotkey": dictation_hotkey_label(),
+                "hotkey": self._hotkeys(settings)["dictation_label"],
+                "hotkeys": self._hotkeys(settings),
                 "microphone": _microphone_payload(settings),
             },
         }
@@ -745,6 +752,18 @@ class ReaderService:
                 raise ValueError("Unknown speech backend.")
             settings["speech_backend"] = backend
             self._status = f"Voice: {SPEECH_BACKENDS[backend]}"
+        if "dictation_key" in payload:
+            key = normalize_dictation_key(payload.get("dictation_key"))
+            if not key:
+                raise ValueError("Unknown dictation key.")
+            settings["dictation_key"] = key
+            self._status = f"Dictation key: hold {dictation_hotkey_label(key)}"
+        if "selection_shortcut" in payload:
+            shortcut = normalize_selection_shortcut(payload.get("selection_shortcut"))
+            if not shortcut:
+                raise ValueError("Unknown read-selection shortcut.")
+            settings["selection_shortcut"] = shortcut
+            self._status = f"Read selection: {selection_hotkey_label(shortcut)}"
         if "kokoro_voice" in payload:
             voice = normalize_voice(payload.get("kokoro_voice"))
             if not voice or not is_known_voice(voice):
@@ -985,7 +1004,8 @@ class ReaderService:
         settings = self._settings()
         return {
             "enabled": self._stt_enabled(),
-            "hotkey": dictation_hotkey_label(),
+            "hotkey": self._hotkeys(settings)["dictation_label"],
+            "hotkeys": self._hotkeys(settings),
             "backend": stt_backend,
             "label": _stt_service_label(stt_backend),
             "service": service,
@@ -1531,6 +1551,21 @@ class ReaderService:
             raise FileNotFoundError("Saved recording file not found.")
         content_type = str(settings.get("last_recording_content_type") or "audio/mp4")
         return resolved.read_bytes(), content_type
+
+    def _hotkeys(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Current hotkeys: saved web setting first, then environment, then defaults."""
+        settings = settings if settings is not None else self._settings()
+        dictation = normalize_dictation_key(settings.get("dictation_key")) or default_dictation_key()
+        selection = normalize_selection_shortcut(settings.get("selection_shortcut")) or default_selection_shortcut()
+        options = hotkey_options()
+        return {
+            "dictation_key": dictation,
+            "dictation_label": dictation_hotkey_label(dictation),
+            "selection_shortcut": selection,
+            "selection_label": selection_hotkey_label(selection),
+            "dictation_options": options["dictation"],
+            "selection_options": options["selection"],
+        }
 
     def _kokoro_voice(self) -> str:
         configured = normalize_voice(self._settings().get("kokoro_voice"))
@@ -4201,6 +4236,33 @@ INDEX_HTML = r"""<!doctype html>
     .footer-settings .speed input[type="range"] { width: 130px; }
     .footer-settings output { color: var(--ink); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 12ch; }
 
+    /* ---------------------------------------------------------------- hotkeys */
+    .hotkeys { display: grid; gap: 8px; padding: 2px 0 4px; }
+    .hotkey-row { display: grid; gap: 5px; }
+    .hotkey-name { color: var(--muted); font-size: 12px; font-weight: 500; }
+    .hotkey-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .hotkey-chip {
+      min-height: 28px;
+      padding: 0 11px;
+      border-radius: 999px;
+      border: 1px solid var(--line-strong);
+      background: var(--bg);
+      color: var(--ink);
+      font-size: 12.5px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    .hotkey-chip[aria-checked="true"] {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-ink);
+      font-weight: 600;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .hotkey-chip:hover:not([aria-checked="true"]) { background: var(--surface); border-color: var(--ink); }
+    }
+    .hotkey-hint { color: var(--muted); font-size: 11.5px; }
+
     /* ---------------------------------------------------------------- voice picker */
     .voice-picker { position: relative; }
     #voiceButton { max-width: 260px; }
@@ -4571,6 +4633,17 @@ INDEX_HTML = r"""<!doctype html>
           <input id="dictationEnabled" type="checkbox">
           <label for="dictationEnabled">Dictation hotkey (hold <span id="dictationHotkey">the dictation key</span>)</label>
         </div>
+        <div class="hotkeys" id="hotkeys">
+          <div class="hotkey-row">
+            <span class="hotkey-name">Dictation key</span>
+            <div class="hotkey-chips" id="dictationKeyChips" role="radiogroup" aria-label="Dictation key (hold to dictate)"></div>
+          </div>
+          <div class="hotkey-row">
+            <span class="hotkey-name">Read selection</span>
+            <div class="hotkey-chips" id="selectionKeyChips" role="radiogroup" aria-label="Read selection shortcut"></div>
+          </div>
+          <div class="hotkey-hint" id="hotkeyHint">Changes apply right away while the helper is running.</div>
+        </div>
         <div class="row service-row">
           <span class="voice-status">Hotkey helper</span>
           <div class="service-actions">
@@ -4695,6 +4768,10 @@ INDEX_HTML = r"""<!doctype html>
     const dictationChipTextEl = $("dictationChipText");
     const dictationEnabledEl = $("dictationEnabled");
     const dictationHotkeyEl = $("dictationHotkey");
+    const dictationKeyChipsEl = $("dictationKeyChips");
+    const selectionKeyChipsEl = $("selectionKeyChips");
+    const hotkeyHintEl = $("hotkeyHint");
+    const hotkeyUi = { signature: "", busy: "" };
     const dictationReadinessEl = $("dictationReadiness");
     const dictationMeterEl = $("dictationMeter");
     const dictationRecordingDebugEl = $("dictationRecordingDebug");
@@ -5493,9 +5570,62 @@ INDEX_HTML = r"""<!doctype html>
       return { key: "ready", label: `Hold ${stt.hotkey || "the dictation key"} to dictate` };
     }
 
+    function renderHotkeys(stt) {
+      const hotkeys = stt.hotkeys || {};
+      const groups = [
+        [dictationKeyChipsEl, "dictation_key", hotkeys.dictation_options || [], hotkeys.dictation_key],
+        [selectionKeyChipsEl, "selection_shortcut", hotkeys.selection_options || [], hotkeys.selection_shortcut]
+      ];
+      const signature = JSON.stringify(groups.map((g) => g[2]));
+      if (hotkeyUi.signature !== signature) {
+        hotkeyUi.signature = signature;
+        for (const [container, field, options] of groups) {
+          container.innerHTML = "";
+          for (const option of options) {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "hotkey-chip";
+            chip.setAttribute("role", "radio");
+            chip.dataset.value = option.value;
+            chip.textContent = option.label;
+            chip.addEventListener("click", () => chooseHotkey(field, option.value));
+            container.appendChild(chip);
+          }
+        }
+      }
+      for (const [container, , , current] of groups) {
+        for (const chip of container.querySelectorAll(".hotkey-chip")) {
+          chip.setAttribute("aria-checked", String(chip.dataset.value === current));
+        }
+      }
+      const mic = stt.microphone || {};
+      hotkeyHintEl.textContent = hotkeyUi.busy
+        ? "Saving..."
+        : (mic.native_helper_online
+          ? "Changes apply right away."
+          : "Saved here; the helper uses them when it starts.");
+    }
+
+    async function chooseHotkey(field, value) {
+      hotkeyUi.busy = field;
+      try {
+        errorEl.textContent = "";
+        render(await api("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ [field]: value })
+        }));
+      } catch (error) {
+        errorEl.textContent = error.message;
+      } finally {
+        hotkeyUi.busy = "";
+      }
+    }
+
     function renderDictation(stt) {
       if (document.activeElement !== dictationEnabledEl) dictationEnabledEl.checked = !!stt.enabled;
       dictationHotkeyEl.textContent = stt.hotkey || "the dictation key";
+      renderHotkeys(stt);
       const service = stt.service || {};
       const mic = stt.microphone || {};
       const current = dictationState(stt);
