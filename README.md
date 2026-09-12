@@ -94,11 +94,24 @@ What the tray helper gives you on Windows:
   Stop, toggle dictation, Quit.
 
 Change the keys from the web page: open **Details**, and under **Dictation**
-pick a chip for the dictation key (Right Ctrl, Right Alt, Right Shift, F8, F9,
-Scroll Lock, Pause) or the read-selection shortcut (Ctrl+Alt+R, Ctrl+Shift+R,
-Ctrl+Alt+S, Alt+Shift+R, Ctrl+Alt+Space). The tray menu has the same lists
-under **Hotkeys**. The running helper switches within a couple of seconds, no
-restart needed, and the choice is saved with the other web settings.
+click the key shown next to "Dictation key" or "Read selection", then press
+the key you want. Preset chips below each field give a one-click swap. The
+running helper switches within a couple of seconds, no restart needed, and
+the choice is saved on disk with the other web settings, so it survives
+restarts and reboots.
+
+Rules, enforced by the page and the server with a plain-language reason:
+
+- Dictation is one key you hold: Ctrl, Alt, or Shift on their own (either
+  side), F1 to F24, Scroll Lock, Pause, Insert, Caps Lock, or a side mouse
+  button (Mouse 4 / Mouse 5). Letters, numbers, Space, Enter, Tab, the
+  Windows/Command key, and left, right, or middle click are refused.
+- Read selection is a chord: at least one of Ctrl, Alt, Shift plus one
+  letter, number, function key, or Space. The Windows/Command key is refused.
+
+On macOS the same page shows Control and Option instead of Ctrl and Alt, and
+the Mac helper applies the saved keys on its next status check (built-in
+fallback: hold Option, Control+Option+Command+R).
 
 Environment variables still work as the fallback default when nothing has been
 picked in the page:

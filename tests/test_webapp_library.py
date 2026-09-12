@@ -592,3 +592,69 @@ class HotkeySwapTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     reader.update_settings({"selection_shortcut": bad})
             self.assertEqual(reader.state()["stt"]["hotkeys"]["dictation_key"], "ctrl_r")
+
+
+class HotkeyRulesTests(unittest.TestCase):
+    def test_dictation_keys_you_do_not_type_with_are_allowed(self) -> None:
+        from doc_reader.platform_tools import validate_dictation_key
+
+        for key in ("ctrl_r", "alt", "shift_l", "f8", "f12", "scroll_lock", "pause", "insert", "mouse:x1", "mouse:x2"):
+            self.assertEqual(validate_dictation_key(key), (key, ""), key)
+        self.assertEqual(validate_dictation_key(" F8 "), ("f8", ""))
+
+    def test_typing_keys_windows_key_and_main_mouse_buttons_are_refused_with_a_reason(self) -> None:
+        from doc_reader.platform_tools import validate_dictation_key
+
+        for key in ("a", "1", "space", "enter", "tab"):
+            value, problem = validate_dictation_key(key)
+            self.assertEqual(value, "", key)
+            self.assertIn("side mouse button", problem)
+        for key in ("cmd", "cmd_l", "win"):
+            self.assertIn("Windows key", validate_dictation_key(key)[1])
+        for key in ("mouse:left", "mouse:right", "mouse:middle"):
+            self.assertIn("side buttons work", validate_dictation_key(key)[1])
+
+    def test_selection_shortcuts_need_a_modifier_and_one_final_key(self) -> None:
+        from doc_reader.platform_tools import validate_selection_shortcut
+
+        self.assertEqual(validate_selection_shortcut("<shift>+<ctrl>+r"), ("<ctrl>+<shift>+r", ""))
+        self.assertEqual(validate_selection_shortcut("<alt>+<f8>"), ("<alt>+<f8>", ""))
+        self.assertEqual(validate_selection_shortcut("<ctrl>+<alt>+<space>"), ("<ctrl>+<alt>+<space>", ""))
+        self.assertIn("Add Ctrl", validate_selection_shortcut("r")[1])
+        self.assertIn("Windows key", validate_selection_shortcut("<cmd>+r")[1])
+        self.assertIn("Finish with", validate_selection_shortcut("<ctrl>+<alt>")[1])
+        self.assertIn("Finish with", validate_selection_shortcut("<ctrl>+<tab>")[1])
+        self.assertIn("one key", validate_selection_shortcut("<ctrl>+a+b")[1])
+
+    def test_labels_read_naturally(self) -> None:
+        from doc_reader.platform_tools import dictation_hotkey_label, selection_hotkey_label
+
+        self.assertEqual(dictation_hotkey_label("mouse:x1"), "Mouse 4")
+        self.assertEqual(dictation_hotkey_label("alt_r"), "Right Alt")
+        self.assertEqual(dictation_hotkey_label("scroll_lock"), "Scroll Lock")
+        self.assertEqual(selection_hotkey_label("<ctrl>+<shift>+<f8>"), "Ctrl+Shift+F8")
+
+
+class HotkeyRecorderTests(unittest.TestCase):
+    setUp = WebappLibraryTests.setUp
+    tearDown = WebappLibraryTests.tearDown
+
+    def test_page_has_click_to_record_fields(self) -> None:
+        self.assertIn('id="dictationKeyField"', INDEX_HTML)
+        self.assertIn('id="selectionKeyField"', INDEX_HTML)
+        self.assertIn("Press a key or a side mouse button", INDEX_HTML)
+        self.assertIn("Press a key combination", INDEX_HTML)
+
+    def test_web_settings_explain_a_refused_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reader = ReaderService(Path(directory))
+            with self.assertRaises(ValueError) as caught:
+                reader.update_settings({"dictation_key": "a"})
+            self.assertIn("side mouse button", str(caught.exception))
+            reader.update_settings({"dictation_key": "mouse:x2", "selection_shortcut": "<shift>+<alt>+<f8>"})
+            hotkeys = reader.native_status()["stt"]["hotkeys"]
+            self.assertEqual(hotkeys["dictation_key"], "mouse:x2")
+            self.assertEqual(hotkeys["dictation_label"], "Mouse 5")
+            self.assertEqual(hotkeys["selection_shortcut"], "<alt>+<shift>+<f8>")
+            self.assertEqual(hotkeys["platform"], "windows")
+            self.assertTrue(hotkeys["dictation_custom"])

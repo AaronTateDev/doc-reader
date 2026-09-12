@@ -50,6 +50,8 @@ from .platform_tools import (
     normalize_dictation_key,
     normalize_selection_shortcut,
     selection_hotkey_label,
+    validate_dictation_key,
+    validate_selection_shortcut,
     find_tool,
     kill_process_tree,
     popen_process_group_kwargs,
@@ -753,15 +755,15 @@ class ReaderService:
             settings["speech_backend"] = backend
             self._status = f"Voice: {SPEECH_BACKENDS[backend]}"
         if "dictation_key" in payload:
-            key = normalize_dictation_key(payload.get("dictation_key"))
-            if not key:
-                raise ValueError("Unknown dictation key.")
+            key, problem = validate_dictation_key(payload.get("dictation_key"))
+            if problem:
+                raise ValueError(problem)
             settings["dictation_key"] = key
             self._status = f"Dictation key: hold {dictation_hotkey_label(key)}"
         if "selection_shortcut" in payload:
-            shortcut = normalize_selection_shortcut(payload.get("selection_shortcut"))
-            if not shortcut:
-                raise ValueError("Unknown read-selection shortcut.")
+            shortcut, problem = validate_selection_shortcut(payload.get("selection_shortcut"))
+            if problem:
+                raise ValueError(problem)
             settings["selection_shortcut"] = shortcut
             self._status = f"Read selection: {selection_hotkey_label(shortcut)}"
         if "kokoro_voice" in payload:
@@ -1559,12 +1561,15 @@ class ReaderService:
         selection = normalize_selection_shortcut(settings.get("selection_shortcut")) or default_selection_shortcut()
         options = hotkey_options()
         return {
+            "platform": "macos" if sys.platform == "darwin" else ("windows" if IS_WINDOWS else sys.platform),
             "dictation_key": dictation,
             "dictation_label": dictation_hotkey_label(dictation),
             "selection_shortcut": selection,
             "selection_label": selection_hotkey_label(selection),
             "dictation_options": options["dictation"],
             "selection_options": options["selection"],
+            "dictation_custom": bool(normalize_dictation_key(settings.get("dictation_key"))),
+            "selection_custom": bool(normalize_selection_shortcut(settings.get("selection_shortcut"))),
         }
 
     def _kokoro_voice(self) -> str:
@@ -4237,9 +4242,50 @@ INDEX_HTML = r"""<!doctype html>
     .footer-settings output { color: var(--ink); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 12ch; }
 
     /* ---------------------------------------------------------------- hotkeys */
-    .hotkeys { display: grid; gap: 8px; padding: 2px 0 4px; }
-    .hotkey-row { display: grid; gap: 5px; }
-    .hotkey-name { color: var(--muted); font-size: 12px; font-weight: 500; }
+    .hotkeys { display: grid; gap: 10px; padding: 2px 0 4px; }
+    .hotkey-row { display: grid; gap: 6px; }
+    .hotkey-head { display: flex; align-items: baseline; gap: 6px; }
+    .hotkey-name { color: var(--ink); font-size: 12.5px; font-weight: 600; }
+    .hotkey-sub { color: var(--muted); font-size: 11.5px; }
+    .hotkey-field {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 6px;
+      width: 100%;
+      min-height: 40px;
+      padding: 5px 9px 5px 7px;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      background: var(--editor);
+      color: var(--ink);
+      text-align: left;
+      transition: border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
+    }
+    .hotkey-field svg { width: 14px; height: 14px; color: var(--muted); margin-left: auto; flex: none; }
+    .hotkey-field.recording {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+    }
+    .hotkey-field.recording svg { color: var(--accent); }
+    .hotkey-prompt { color: var(--muted); font-size: 12.5px; }
+    .keycaps { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+    .keycaps .plus { color: var(--muted); font-size: 11px; }
+    kbd.keycap {
+      font: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      line-height: 1;
+      padding: 6px 9px;
+      border-radius: 6px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-bottom-width: 2px;
+      color: var(--ink);
+      white-space: nowrap;
+    }
+    .hotkey-error { color: var(--warn); font-size: 12px; line-height: 1.35; }
+    .hotkey-error:empty { display: none; }
     .hotkey-chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .hotkey-chip {
       min-height: 28px;
@@ -4635,12 +4681,24 @@ INDEX_HTML = r"""<!doctype html>
         </div>
         <div class="hotkeys" id="hotkeys">
           <div class="hotkey-row">
-            <span class="hotkey-name">Dictation key</span>
-            <div class="hotkey-chips" id="dictationKeyChips" role="radiogroup" aria-label="Dictation key (hold to dictate)"></div>
+            <div class="hotkey-head"><span class="hotkey-name">Dictation key</span><span class="hotkey-sub">hold to talk</span></div>
+            <button class="hotkey-field" id="dictationKeyField" type="button" aria-label="Change the dictation key" aria-pressed="false">
+              <span class="keycaps" id="dictationKeyCaps"></span>
+              <span class="hotkey-prompt" id="dictationKeyPrompt" hidden>Press a key or a side mouse button</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            </button>
+            <div class="hotkey-error" id="dictationKeyError" role="alert"></div>
+            <div class="hotkey-chips" id="dictationKeyChips" role="radiogroup" aria-label="Dictation key presets"></div>
           </div>
           <div class="hotkey-row">
-            <span class="hotkey-name">Read selection</span>
-            <div class="hotkey-chips" id="selectionKeyChips" role="radiogroup" aria-label="Read selection shortcut"></div>
+            <div class="hotkey-head"><span class="hotkey-name">Read selection</span><span class="hotkey-sub">press to read the highlighted text</span></div>
+            <button class="hotkey-field" id="selectionKeyField" type="button" aria-label="Change the read-selection shortcut" aria-pressed="false">
+              <span class="keycaps" id="selectionKeyCaps"></span>
+              <span class="hotkey-prompt" id="selectionKeyPrompt" hidden>Press a key combination</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            </button>
+            <div class="hotkey-error" id="selectionKeyError" role="alert"></div>
+            <div class="hotkey-chips" id="selectionKeyChips" role="radiogroup" aria-label="Read selection presets"></div>
           </div>
           <div class="hotkey-hint" id="hotkeyHint">Changes apply right away while the helper is running.</div>
         </div>
@@ -4771,7 +4829,27 @@ INDEX_HTML = r"""<!doctype html>
     const dictationKeyChipsEl = $("dictationKeyChips");
     const selectionKeyChipsEl = $("selectionKeyChips");
     const hotkeyHintEl = $("hotkeyHint");
-    const hotkeyUi = { signature: "", busy: "" };
+    const hotkeyUi = { signature: "", busy: "", hotkeys: {}, recording: "", cleanup: null, timer: null, pendingModifier: "", heldModifiers: new Set() };
+    const hotkeyFields = {
+      dictation: { field: $("dictationKeyField"), caps: $("dictationKeyCaps"), prompt: $("dictationKeyPrompt"), error: $("dictationKeyError"), setting: "dictation_key", label: "dictation_label" },
+      selection: { field: $("selectionKeyField"), caps: $("selectionKeyCaps"), prompt: $("selectionKeyPrompt"), error: $("selectionKeyError"), setting: "selection_shortcut", label: "selection_label" }
+    };
+    // DOM event.code -> the key names the helpers understand (single keys only).
+    const HOTKEY_CODES = {
+      ControlLeft: "ctrl_l", ControlRight: "ctrl_r", AltLeft: "alt_l", AltRight: "alt_r", ShiftLeft: "shift_l", ShiftRight: "shift_r",
+      ScrollLock: "scroll_lock", Pause: "pause", Insert: "insert", CapsLock: "caps_lock", NumLock: "num_lock", PrintScreen: "print_screen",
+      ContextMenu: "menu", Home: "home", End: "end", PageUp: "page_up", PageDown: "page_down"
+    };
+    for (let n = 1; n <= 24; n += 1) HOTKEY_CODES[`F${n}`] = `f${n}`;
+    const CHORD_MODIFIERS = { ControlLeft: "<ctrl>", ControlRight: "<ctrl>", AltLeft: "<alt>", AltRight: "<alt>", ShiftLeft: "<shift>", ShiftRight: "<shift>" };
+    const HOTKEY_MESSAGES = {
+      win: "The Windows key (Command on a Mac) can't be used.",
+      typing: "Use a key you don't type with: Ctrl, Alt, Shift, F1 to F12, Scroll Lock, Pause, Insert, or a side mouse button.",
+      mouse: "Left, right, and middle click can't be used. The side buttons work.",
+      noModifier: "Add Ctrl, Alt, or Shift to it.",
+      badFinal: "Finish with a letter, number, function key, or Space.",
+      chordMouse: "Mouse buttons can't be part of this shortcut."
+    };
     const dictationReadinessEl = $("dictationReadiness");
     const dictationMeterEl = $("dictationMeter");
     const dictationRecordingDebugEl = $("dictationRecordingDebug");
@@ -5570,8 +5648,174 @@ INDEX_HTML = r"""<!doctype html>
       return { key: "ready", label: `Hold ${stt.hotkey || "the dictation key"} to dictate` };
     }
 
+    function keyWord(token) {
+      const mac = (hotkeyUi.hotkeys.platform || "") === "macos";
+      const base = { ctrl: mac ? "Control" : "Ctrl", alt: mac ? "Option" : "Alt", shift: "Shift", cmd: mac ? "Command" : "Win", space: "Space" };
+      const clean = token.replace(/^<|>$/g, "");
+      if (base[clean]) return base[clean];
+      const side = clean.match(/^(ctrl|alt|shift)_(l|r)$/);
+      if (side) return `${side[2] === "l" ? "Left" : "Right"} ${base[side[1]]}`;
+      if (/^f\d+$/.test(clean)) return clean.toUpperCase();
+      if (clean === "mouse:x1") return "Mouse 4";
+      if (clean === "mouse:x2") return "Mouse 5";
+      return clean.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+
+    function renderKeycaps(container, label) {
+      container.innerHTML = "";
+      const parts = String(label || "").split("+").filter(Boolean);
+      parts.forEach((part, index) => {
+        if (index) {
+          const plus = document.createElement("span");
+          plus.className = "plus";
+          plus.textContent = "+";
+          container.appendChild(plus);
+        }
+        const cap = document.createElement("kbd");
+        cap.className = "keycap";
+        cap.textContent = part.trim();
+        container.appendChild(cap);
+      });
+    }
+
+    function stopHotkeyRecording() {
+      if (!hotkeyUi.recording) return;
+      const entry = hotkeyFields[hotkeyUi.recording];
+      hotkeyUi.recording = "";
+      if (hotkeyUi.cleanup) hotkeyUi.cleanup();
+      hotkeyUi.cleanup = null;
+      clearTimeout(hotkeyUi.timer);
+      entry.field.classList.remove("recording");
+      entry.field.setAttribute("aria-pressed", "false");
+      entry.prompt.hidden = true;
+      entry.caps.hidden = false;
+      renderKeycaps(entry.caps, hotkeyUi.hotkeys[entry.label]);
+    }
+
+    function finishHotkeyRecording(kind, value, problem) {
+      const entry = hotkeyFields[kind];
+      stopHotkeyRecording();
+      if (problem) {
+        entry.error.textContent = problem;
+        return;
+      }
+      chooseHotkey(entry.setting, value, entry.error);
+    }
+
+    function chordFinalKey(code) {
+      let match = code.match(/^Key([A-Z])$/);
+      if (match) return match[1].toLowerCase();
+      match = code.match(/^Digit(\d)$/);
+      if (match) return match[1];
+      match = code.match(/^F(\d{1,2})$/);
+      if (match) return `<f${match[1]}>`;
+      if (code === "Space") return "<space>";
+      return "";
+    }
+
+    function startHotkeyRecording(kind) {
+      if (hotkeyUi.recording === kind) {
+        stopHotkeyRecording();
+        return;
+      }
+      stopHotkeyRecording();
+      const entry = hotkeyFields[kind];
+      entry.error.textContent = "";
+      entry.field.classList.add("recording");
+      entry.field.setAttribute("aria-pressed", "true");
+      entry.caps.hidden = true;
+      entry.prompt.hidden = false;
+      entry.prompt.textContent = kind === "dictation" ? "Press a key or a side mouse button" : "Press a key combination";
+      hotkeyUi.recording = kind;
+      hotkeyUi.pendingModifier = "";
+      hotkeyUi.heldModifiers = new Set();
+
+      const previewChord = () => {
+        const held = ["<ctrl>", "<alt>", "<shift>"].filter((m) => hotkeyUi.heldModifiers.has(m));
+        entry.prompt.textContent = held.length ? `${held.map(keyWord).join(" + ")} + ...` : "Press a key combination";
+      };
+      const isWinKey = (event) => event.code.startsWith("Meta") || event.key === "Meta" || event.key === "OS";
+
+      const onKeyDown = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.key === "Escape") { stopHotkeyRecording(); return; }
+        if (event.repeat) return;
+        if (isWinKey(event)) { finishHotkeyRecording(kind, "", HOTKEY_MESSAGES.win); return; }
+        const modifier = CHORD_MODIFIERS[event.code];
+        if (kind === "dictation") {
+          if (modifier) {
+            hotkeyUi.pendingModifier = HOTKEY_CODES[event.code];
+            entry.prompt.textContent = `${keyWord(hotkeyUi.pendingModifier)} (release to use it)`;
+            return;
+          }
+          hotkeyUi.pendingModifier = "";
+          const single = HOTKEY_CODES[event.code];
+          finishHotkeyRecording(kind, single, single ? "" : HOTKEY_MESSAGES.typing);
+          return;
+        }
+        if (modifier) { hotkeyUi.heldModifiers.add(modifier); previewChord(); return; }
+        const mods = [];
+        if (event.ctrlKey) mods.push("<ctrl>");
+        if (event.altKey) mods.push("<alt>");
+        if (event.shiftKey) mods.push("<shift>");
+        if (!mods.length) { finishHotkeyRecording(kind, "", HOTKEY_MESSAGES.noModifier); return; }
+        const finalKey = chordFinalKey(event.code);
+        if (!finalKey) { finishHotkeyRecording(kind, "", HOTKEY_MESSAGES.badFinal); return; }
+        finishHotkeyRecording(kind, `${mods.join("+")}+${finalKey}`, "");
+      };
+      const onKeyUp = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (kind === "dictation") {
+          if (hotkeyUi.pendingModifier && HOTKEY_CODES[event.code] === hotkeyUi.pendingModifier) {
+            finishHotkeyRecording(kind, hotkeyUi.pendingModifier, "");
+          }
+          return;
+        }
+        const modifier = CHORD_MODIFIERS[event.code];
+        if (modifier) { hotkeyUi.heldModifiers.delete(modifier); previewChord(); }
+      };
+      const onMouseDown = (event) => {
+        if (event.button >= 3) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (kind === "dictation") finishHotkeyRecording(kind, event.button === 3 ? "mouse:x1" : "mouse:x2", "");
+          else finishHotkeyRecording(kind, "", HOTKEY_MESSAGES.chordMouse);
+          return;
+        }
+        if (entry.field.contains(event.target)) return; // the click handler toggles recording off
+        if (event.button !== 0 && kind === "dictation") { event.preventDefault(); finishHotkeyRecording(kind, "", HOTKEY_MESSAGES.mouse); return; }
+        stopHotkeyRecording();
+      };
+      const swallowSideButtons = (event) => { if (event.button >= 3) { event.preventDefault(); event.stopPropagation(); } };
+      const onBlur = () => stopHotkeyRecording();
+      document.addEventListener("keydown", onKeyDown, true);
+      document.addEventListener("keyup", onKeyUp, true);
+      document.addEventListener("mousedown", onMouseDown, true);
+      document.addEventListener("mouseup", swallowSideButtons, true);
+      document.addEventListener("auxclick", swallowSideButtons, true);
+      document.addEventListener("contextmenu", swallowSideButtons, true);
+      window.addEventListener("blur", onBlur);
+      hotkeyUi.cleanup = () => {
+        document.removeEventListener("keydown", onKeyDown, true);
+        document.removeEventListener("keyup", onKeyUp, true);
+        document.removeEventListener("mousedown", onMouseDown, true);
+        document.removeEventListener("mouseup", swallowSideButtons, true);
+        document.removeEventListener("auxclick", swallowSideButtons, true);
+        document.removeEventListener("contextmenu", swallowSideButtons, true);
+        window.removeEventListener("blur", onBlur);
+      };
+      hotkeyUi.timer = setTimeout(stopHotkeyRecording, 15000);
+      entry.field.focus();
+    }
+
     function renderHotkeys(stt) {
       const hotkeys = stt.hotkeys || {};
+      hotkeyUi.hotkeys = hotkeys;
+      for (const kind of Object.keys(hotkeyFields)) {
+        if (hotkeyUi.recording !== kind) renderKeycaps(hotkeyFields[kind].caps, hotkeys[hotkeyFields[kind].label]);
+      }
       const groups = [
         [dictationKeyChipsEl, "dictation_key", hotkeys.dictation_options || [], hotkeys.dictation_key],
         [selectionKeyChipsEl, "selection_shortcut", hotkeys.selection_options || [], hotkeys.selection_shortcut]
@@ -5588,7 +5832,7 @@ INDEX_HTML = r"""<!doctype html>
             chip.setAttribute("role", "radio");
             chip.dataset.value = option.value;
             chip.textContent = option.label;
-            chip.addEventListener("click", () => chooseHotkey(field, option.value));
+            chip.addEventListener("click", () => chooseHotkey(field, option.value, container.closest(".hotkey-row").querySelector(".hotkey-error")));
             container.appendChild(chip);
           }
         }
@@ -5602,25 +5846,32 @@ INDEX_HTML = r"""<!doctype html>
       hotkeyHintEl.textContent = hotkeyUi.busy
         ? "Saving..."
         : (mic.native_helper_online
-          ? "Changes apply right away."
-          : "Saved here; the helper uses them when it starts.");
+          ? "Click a key to change it. Changes apply right away."
+          : "Click a key to change it. Saved here; the helper uses them when it starts.");
     }
 
-    async function chooseHotkey(field, value) {
+    async function chooseHotkey(field, value, errorSlot) {
       hotkeyUi.busy = field;
+      const slot = errorSlot || errorEl;
       try {
-        errorEl.textContent = "";
+        slot.textContent = "";
+        for (const entry of Object.values(hotkeyFields)) {
+          if (entry.setting === field) entry.error.textContent = "";
+        }
         render(await api("/api/settings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ [field]: value })
         }));
       } catch (error) {
-        errorEl.textContent = error.message;
+        slot.textContent = error.message;
       } finally {
         hotkeyUi.busy = "";
       }
     }
+
+    hotkeyFields.dictation.field.addEventListener("click", () => startHotkeyRecording("dictation"));
+    hotkeyFields.selection.field.addEventListener("click", () => startHotkeyRecording("selection"));
 
     function renderDictation(stt) {
       if (document.activeElement !== dictationEnabledEl) dictationEnabledEl.checked = !!stt.enabled;
@@ -6111,6 +6362,7 @@ INDEX_HTML = r"""<!doctype html>
 
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
+      if (hotkeyUi.recording) return; // the recorder handles its own Escape
       if (voiceUi.open) {
         event.preventDefault();
         setVoiceMenuOpen(false, { restoreFocus: true });

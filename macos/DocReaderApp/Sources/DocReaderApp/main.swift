@@ -1677,7 +1677,36 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastSavedRecordingCreatedAt: TimeInterval = 0
     private var webReadingPaused = false
     private var webActiveItemID: String?
-    private let optionKeyCodes: Set<UInt16> = [58, 61]
+    // Hotkeys chosen on the web page (Details > Dictation) arrive through the
+    // /api/native/status poll as small specs ("alt_r", "f8", "mouse:x1",
+    // "<ctrl>+<shift>+r"). Anything missing or unparseable keeps the built-in keys:
+    // hold Option to dictate, Control+Option+Command+R (and the older gestures) to read.
+    private var dictationHotkeySpec = ""
+    private var readbackShortcutSpec = ""
+    private var dictationModifierFlag: NSEvent.ModifierFlags? = .option
+    private var dictationModifierKeyCodes: Set<UInt16> = [58, 61]
+    private var dictationPlainKeyCode: UInt16?
+    private var dictationMouseButton: Int?
+    private var dictationKeyDisplayName = "Option"
+    private var customReadbackFlags: NSEvent.ModifierFlags?
+    private var customReadbackKeyCode: UInt16?
+    private var globalKeyUpMonitor: Any?
+    private var localKeyUpMonitor: Any?
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
+    private static let modifierKeyCodes: [String: [UInt16]] = [
+        "ctrl": [59, 62], "ctrl_l": [59], "ctrl_r": [62],
+        "alt": [58, 61], "alt_l": [58], "alt_r": [61], "alt_gr": [61],
+        "shift": [56, 60], "shift_l": [56], "shift_r": [60],
+    ]
+    private static let plainKeyCodes: [String: UInt16] = [
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98, "f8": 100, "f9": 101, "f10": 109,
+        "f11": 103, "f12": 111, "f13": 105, "f14": 107, "f15": 113, "f16": 106, "f17": 64, "f18": 79, "f19": 80, "f20": 90,
+        "insert": 114, "home": 115, "end": 119, "page_up": 116, "page_down": 121,
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12, "w": 13,
+        "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26,
+        "8": 28, "0": 29, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46, "space": 49,
+    ]
     private let rightCommandKeyCode: UInt16 = 54
     private let readSelectedTextKeyCode: UInt16 = 15
     private let commandLReadSelectedTextKeyCode: UInt16 = 37
@@ -1699,6 +1728,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
         installDictationHotkeyMonitor()
         installSelectedTextReadbackMonitor()
+        installCustomDictationMonitors()
         ensureWebAppRunning()
         ensureStartupOrchestration()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
@@ -1905,6 +1935,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleReadbackHotkey(_ event: NSEvent) {
+        if let plainCode = dictationPlainKeyCode, event.keyCode == plainCode {
+            handleCustomDictationGesture(down: true, isRepeat: event.isARepeat)
+            return
+        }
         if event.keyCode == 53, audioRecorder != nil || recordingStartPending || dictationTranscriptionID != nil {
             cancelDictationRecording()
             return
@@ -1913,6 +1947,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if let customCode = customReadbackKeyCode, let customFlags = customReadbackFlags {
+            let pressed = flags.intersection([.control, .option, .shift, .command])
+            guard event.keyCode == customCode, pressed == customFlags else {
+                return
+            }
+            pendingDictationStart?.cancel()
+            pendingDictationStart = nil
+            logDictation("custom selected-text readback shortcut")
+            readSelectedText()
+            return
+        }
         let usesControlCommand = flags.contains(.control) && flags.contains(.command)
         let usesControlOption = flags.contains(.control) && flags.contains(.option)
         let usesLegacyReadback = event.keyCode == readSelectedTextKeyCode && (usesControlCommand || usesControlOption)
@@ -1942,8 +1987,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleModifierFlags(_ event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         handleReadbackModifierGesture(event, flags: flags)
-        let optionDown = flags.contains(.option)
-        let optionOnlyGesture = optionDown && flags.intersection([.command, .control, .shift]).isEmpty
+        guard let dictationFlag = dictationModifierFlag else {
+            return // the dictation key is a plain key or a mouse button; handled elsewhere
+        }
+        let optionDown = flags.contains(dictationFlag)
+        let otherModifiers = NSEvent.ModifierFlags([.command, .control, .option, .shift]).subtracting(dictationFlag)
+        let optionOnlyGesture = optionDown && flags.intersection(otherModifiers).isEmpty
         if optionOnlyGesture {
             pendingDictationStop?.cancel()
             pendingDictationStop = nil
@@ -1952,8 +2001,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     dictationLatchedByRapidRelease = true
                     optionKeyWasDown = false
                     dictationGestureActive = true
-                    showRecordingOverlay(text: "Recording... tap Option to stop")
-                    statusMenuItem.title = "Recording dictation. Tap Option to stop."
+                    showRecordingOverlay(text: "Recording... tap \(dictationKeyDisplayName) to stop")
+                    statusMenuItem.title = "Recording dictation. Tap \(dictationKeyDisplayName) to stop."
                     logDictation("ignored rapid option stop")
                     publishNativeDictationStatus(activeMicrophoneID: selectedMicrophoneDevice()?.uniqueID ?? "")
                     return
@@ -1990,8 +2039,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             guard optionKeyWasDown else {
                 return
             }
-            guard optionKeyCodes.contains(event.keyCode) else {
-                logDictation("ignored non-option modifier change keyCode=\(event.keyCode)")
+            guard dictationModifierKeyCodes.contains(event.keyCode) else {
+                logDictation("ignored other modifier change keyCode=\(event.keyCode)")
                 return
             }
             scheduleDictationStop()
@@ -2116,8 +2165,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.audioRecorder != nil || self.recordingStartPending {
                 self.dictationLatchedByRapidRelease = true
                 self.dictationGestureActive = true
-                self.showRecordingOverlay(text: "Recording... tap Option to stop")
-                self.statusMenuItem.title = "Recording dictation. Tap Option to stop."
+                self.showRecordingOverlay(text: "Recording... tap \(dictationKeyDisplayName) to stop")
+                self.statusMenuItem.title = "Recording dictation. Tap \(dictationKeyDisplayName) to stop."
                 self.logDictation("option release ignored; recording latched")
                 self.publishNativeDictationStatus(activeMicrophoneID: self.selectedMicrophoneDevice()?.uniqueID ?? "")
                 return
@@ -2129,10 +2178,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
     }
 
+    private func dictationModifierMask() -> CGEventFlags? {
+        guard let flag = dictationModifierFlag else {
+            return nil
+        }
+        if flag == .control {
+            return .maskControl
+        }
+        if flag == .shift {
+            return .maskShift
+        }
+        return .maskAlternate
+    }
+
     private func isOptionKeyCurrentlyDown() -> Bool {
+        guard let mask = dictationModifierMask() else {
+            return optionKeyWasDown
+        }
         let combined = CGEventSource.flagsState(.combinedSessionState)
         let hid = CGEventSource.flagsState(.hidSystemState)
-        return combined.contains(.maskAlternate) || hid.contains(.maskAlternate)
+        return combined.contains(mask) || hid.contains(mask)
     }
 
     private func isBareCommandKeyCurrentlyDown() -> Bool {
@@ -2147,14 +2212,180 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func isBareOptionKeyCurrentlyDown() -> Bool {
+        guard let mask = dictationModifierMask() else {
+            return optionKeyWasDown
+        }
         let combined = CGEventSource.flagsState(.combinedSessionState)
         let hid = CGEventSource.flagsState(.hidSystemState)
-        let optionDown = combined.contains(.maskAlternate) || hid.contains(.maskAlternate)
-        let chordDown =
-            combined.contains(.maskCommand) || hid.contains(.maskCommand) ||
-            combined.contains(.maskControl) || hid.contains(.maskControl) ||
-            combined.contains(.maskShift) || hid.contains(.maskShift)
-        return optionDown && !chordDown
+        let keyDown = combined.contains(mask) || hid.contains(mask)
+        let others: [CGEventFlags] = [.maskCommand, .maskAlternate, .maskControl, .maskShift].filter { $0 != mask }
+        let chordDown = others.contains { combined.contains($0) || hid.contains($0) }
+        return keyDown && !chordDown
+    }
+
+    // MARK: - Hotkeys chosen on the web page
+
+    private func installCustomDictationMonitors() {
+        globalKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyUp) { [weak self] event in
+            DispatchQueue.main.async {
+                self?.handlePlainDictationKeyUp(event)
+            }
+        }
+        localKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+            self?.handlePlainDictationKeyUp(event)
+            return event
+        }
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.otherMouseDown, .otherMouseUp]) { [weak self] event in
+            DispatchQueue.main.async {
+                self?.handleMouseDictationButton(event)
+            }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.otherMouseDown, .otherMouseUp]) { [weak self] event in
+            self?.handleMouseDictationButton(event)
+            return event
+        }
+    }
+
+    private func handlePlainDictationKeyUp(_ event: NSEvent) {
+        guard let plainCode = dictationPlainKeyCode, event.keyCode == plainCode else {
+            return
+        }
+        handleCustomDictationGesture(down: false, isRepeat: false)
+    }
+
+    private func handleMouseDictationButton(_ event: NSEvent) {
+        guard let wanted = dictationMouseButton, event.buttonNumber == wanted else {
+            return
+        }
+        handleCustomDictationGesture(down: event.type == .otherMouseDown, isRepeat: false)
+    }
+
+    /// Hold-to-talk for a plain key (F8, Insert, ...) or a side mouse button.
+    private func handleCustomDictationGesture(down: Bool, isRepeat: Bool) {
+        if down {
+            guard !isRepeat, !optionKeyWasDown else {
+                return
+            }
+            optionKeyWasDown = true
+            dictationGestureActive = true
+            lastDictationGestureAt = Date()
+            logDictation("\(dictationKeyDisplayName) down")
+            startDictationRecordingIfEnabled()
+            return
+        }
+        guard optionKeyWasDown else {
+            return
+        }
+        optionKeyWasDown = false
+        dictationGestureActive = false
+        dictationLatchedByRapidRelease = false
+        lastDictationGestureAt = Date()
+        if audioRecorder != nil || recordingStartPending {
+            logDictation("\(dictationKeyDisplayName) up")
+            stopDictationRecording(send: true)
+        }
+    }
+
+    private func applyHotkeySettings(dictation: String, readback: String) {
+        if dictation != dictationHotkeySpec {
+            dictationHotkeySpec = dictation
+            applyDictationHotkey(dictation)
+        }
+        if readback != readbackShortcutSpec {
+            readbackShortcutSpec = readback
+            applyReadbackShortcut(readback)
+        }
+    }
+
+    private func applyDictationHotkey(_ spec: String) {
+        var flag: NSEvent.ModifierFlags? = .option
+        var codes: Set<UInt16> = [58, 61]
+        var plainCode: UInt16?
+        var mouseButton: Int?
+        var name = "Option"
+        let key = spec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let plainKeyNames = ["insert", "home", "end", "page_up", "page_down"]
+        if key.isEmpty || key == "alt" {
+            // built-in: hold Option
+        } else if let modifierCodes = Self.modifierKeyCodes[key] {
+            codes = Set(modifierCodes)
+            if key.hasPrefix("ctrl") {
+                flag = .control
+                name = "Control"
+            } else if key.hasPrefix("shift") {
+                flag = .shift
+                name = "Shift"
+            } else {
+                flag = .option
+                name = "Option"
+            }
+            if key.hasSuffix("_l") {
+                name = "Left " + name
+            } else if key.hasSuffix("_r") || key == "alt_gr" {
+                name = "Right " + name
+            }
+        } else if key == "mouse:x1" || key == "mouse:x2" {
+            flag = nil
+            codes = []
+            mouseButton = key == "mouse:x1" ? 3 : 4
+            name = key == "mouse:x1" ? "Mouse 4" : "Mouse 5"
+        } else if key.hasPrefix("f") || plainKeyNames.contains(key), let code = Self.plainKeyCodes[key] {
+            flag = nil
+            codes = []
+            plainCode = code
+            name = key.hasPrefix("f") ? key.uppercased() : key.replacingOccurrences(of: "_", with: " ").capitalized
+        } else {
+            logDictation("unsupported dictation key '\(key)'; keeping Option")
+        }
+        if audioRecorder != nil || recordingStartPending {
+            stopDictationRecording(send: true)
+        }
+        optionKeyWasDown = false
+        dictationGestureActive = false
+        dictationModifierFlag = flag
+        dictationModifierKeyCodes = codes
+        dictationPlainKeyCode = plainCode
+        dictationMouseButton = mouseButton
+        dictationKeyDisplayName = name
+        logDictation("dictation key now \(name)")
+    }
+
+    private func applyReadbackShortcut(_ spec: String) {
+        let chord = spec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !chord.isEmpty, chord != "<ctrl>+<alt>+<cmd>+r" else {
+            customReadbackFlags = nil
+            customReadbackKeyCode = nil
+            logDictation("read-selection shortcut: built-in")
+            return
+        }
+        var flags: NSEvent.ModifierFlags = []
+        var keyCode: UInt16?
+        for part in chord.split(separator: "+").map(String.init) {
+            switch part {
+            case "<ctrl>":
+                flags.insert(.control)
+            case "<alt>":
+                flags.insert(.option)
+            case "<shift>":
+                flags.insert(.shift)
+            case "<cmd>":
+                flags.insert(.command)
+            default:
+                let token = part.hasPrefix("<") && part.hasSuffix(">") && part.count > 2
+                    ? String(part.dropFirst().dropLast())
+                    : part
+                keyCode = Self.plainKeyCodes[token]
+            }
+        }
+        guard let code = keyCode, !flags.isEmpty else {
+            customReadbackFlags = nil
+            customReadbackKeyCode = nil
+            logDictation("unsupported read-selection shortcut '\(chord)'; keeping built-in")
+            return
+        }
+        customReadbackFlags = flags
+        customReadbackKeyCode = code
+        logDictation("read-selection shortcut now \(chord)")
     }
 
     private func isRapidToggleStop() -> Bool {
@@ -2280,11 +2511,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             audioRecorder = recorder
             setRecordingStartPending(false)
             let overlayText = dictationLatchedByRapidRelease
-                ? "Recording... tap Option to stop"
+                ? "Recording... tap \(dictationKeyDisplayName) to stop"
                 : "Recording..."
             showRecordingOverlay(text: overlayText)
             statusMenuItem.title = dictationLatchedByRapidRelease
-                ? "Recording dictation. Tap Option to stop."
+                ? "Recording dictation. Tap \(dictationKeyDisplayName) to stop."
                 : "Recording dictation with \(device.localizedName)..."
             lastDictationEvent = "recording with \(device.localizedName)"
             logDictation("recording started microphone=\(device.localizedName)")
@@ -3152,11 +3383,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             let sttEnabled = stt?["enabled"] as? Bool ?? false
             let microphone = stt?["microphone"] as? [String: Any]
             let selectedMicrophoneID = microphone?["selected_id"] as? String ?? ""
+            let hotkeys = stt?["hotkeys"] as? [String: Any]
+            let dictationSpecFromWeb = hotkeys?["dictation_key"] as? String ?? ""
+            let readbackSpecFromWeb = hotkeys?["selection_shortcut"] as? String ?? ""
             DispatchQueue.main.async {
                 self.webReadingPaused = paused
                 self.webActiveItemID = activeID.isEmpty ? nil : activeID
                 self.dictationEnabled = sttEnabled
                 self.selectedMicrophoneID = selectedMicrophoneID
+                self.applyHotkeySettings(dictation: dictationSpecFromWeb, readback: readbackSpecFromWeb)
                 if sttEnabled {
                     self.requestInputMonitoringAccessIfNeeded()
                 }

@@ -408,7 +408,7 @@ def main() -> int:
         from PySide6.QtCore import QObject, Qt, QTimer, Signal
         from PySide6.QtGui import QAction, QActionGroup, QFont
         from PySide6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon
-        from pynput import keyboard
+        from pynput import keyboard, mouse
     except ModuleNotFoundError as exc:
         print(f"[doc-reader] Missing dependency for the Windows helper: {exc}")
         return 1
@@ -764,19 +764,36 @@ def main() -> int:
 
     # The bindings live in a dict so the heartbeat can swap them without restarting
     # the listener when the web page or tray menu picks a different key.
-    bindings: dict[str, Any] = {"dictation_name": "", "selection_name": "", "dictation": None, "selection": None}
+    bindings: dict[str, Any] = {
+        "dictation_name": "",
+        "selection_name": "",
+        "dictation_keys": frozenset(),   # pynput Key objects that count as the dictation key
+        "dictation_mouse": None,         # pynput mouse.Button for a side-button dictation key
+        "selection": None,
+    }
+
+    def _dictation_keys_for(name: str) -> frozenset:
+        """Generic modifiers ("ctrl") match either side; everything else is one key."""
+        if name in ("ctrl", "alt", "shift"):
+            return frozenset(_parse_key(candidate) for candidate in (name, f"{name}_l", f"{name}_r"))
+        return frozenset([_parse_key(name)])
 
     def apply_hotkeys(dictation_name: str, selection_name: str) -> bool:
         changed = False
         dictation_name = normalize_dictation_key(dictation_name) or DEFAULT_WINDOWS_DICTATION_KEY
         selection_name = normalize_selection_shortcut(selection_name) or DEFAULT_WINDOWS_SELECTION_HOTKEY
         if dictation_name != bindings["dictation_name"]:
-            try:
-                bindings["dictation"] = _parse_key(dictation_name)
-            except ValueError as exc:
-                print(f"[doc-reader] {exc}; falling back to {DEFAULT_WINDOWS_DICTATION_KEY}", flush=True)
-                dictation_name = DEFAULT_WINDOWS_DICTATION_KEY
-                bindings["dictation"] = _parse_key(dictation_name)
+            if dictation_name.startswith("mouse:"):
+                bindings["dictation_keys"] = frozenset()
+                bindings["dictation_mouse"] = mouse.Button.x1 if dictation_name == "mouse:x1" else mouse.Button.x2
+            else:
+                bindings["dictation_mouse"] = None
+                try:
+                    bindings["dictation_keys"] = _dictation_keys_for(dictation_name)
+                except (ValueError, AttributeError) as exc:
+                    print(f"[doc-reader] {exc}; falling back to {DEFAULT_WINDOWS_DICTATION_KEY}", flush=True)
+                    dictation_name = DEFAULT_WINDOWS_DICTATION_KEY
+                    bindings["dictation_keys"] = _dictation_keys_for(dictation_name)
             bindings["dictation_name"] = dictation_name
             changed = True
         if selection_name != bindings["selection_name"]:
@@ -818,7 +835,7 @@ def main() -> int:
             bindings["selection"].press(canonical(key))
         except Exception:  # noqa: BLE001
             pass
-        if key == bindings["dictation"] and not hotkey_state["dictation_down"]:
+        if key in bindings["dictation_keys"] and not hotkey_state["dictation_down"]:
             hotkey_state["dictation_down"] = True
             bridge.dictationStarted.emit()
 
@@ -829,7 +846,18 @@ def main() -> int:
             bindings["selection"].release(canonical(key))
         except Exception:  # noqa: BLE001
             pass
-        if key == bindings["dictation"] and hotkey_state["dictation_down"]:
+        if key in bindings["dictation_keys"] and hotkey_state["dictation_down"]:
+            hotkey_state["dictation_down"] = False
+            bridge.dictationStopped.emit()
+
+    def on_click(_x, _y, button, pressed) -> None:  # noqa: ANN001
+        wanted = bindings["dictation_mouse"]
+        if wanted is None or button != wanted:
+            return
+        if pressed and not hotkey_state["dictation_down"]:
+            hotkey_state["dictation_down"] = True
+            bridge.dictationStarted.emit()
+        elif not pressed and hotkey_state["dictation_down"]:
             hotkey_state["dictation_down"] = False
             bridge.dictationStopped.emit()
 
@@ -837,6 +865,10 @@ def main() -> int:
     listener_holder["listener"] = listener
     listener.daemon = True
     listener.start()
+    # Side mouse buttons (Mouse 4 / Mouse 5) can be the dictation key too.
+    mouse_listener = mouse.Listener(on_click=on_click)
+    mouse_listener.daemon = True
+    mouse_listener.start()
 
     # Safety: never record longer than MAX_DICTATION_SECONDS even if a release is missed.
     def enforce_max_recording() -> None:

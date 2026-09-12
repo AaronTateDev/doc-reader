@@ -155,3 +155,55 @@ choosing Emma persisted and the reader subprocess launched with
 `--http-tts-voice bf_emma`, engine section expand/collapse, Escape and outside
 click, arrow keys, 390x844 sheet, light theme, unknown voice ids rejected
 (400). `python -m unittest discover -s tests`: 26 tests pass.
+
+## Addendum (2026-09-12): hotkey quick swap and custom keys
+
+Details > Dictation now has two hotkey rows. Each shows the current key as
+key caps in a field; clicking the field records the next press (or side
+mouse button) and saves it, or explains why it was refused. Preset chips under
+each field give one-click swaps. The stored form is platform-neutral
+(`doc_reader/platform_tools.py`: `validate_dictation_key`,
+`validate_selection_shortcut`), saved in the web settings file, and exposed
+in `stt.hotkeys` of `/api/native/status`.
+
+- Windows helper: rebinds on its next heartbeat; a `pynput` mouse listener
+  handles Mouse 4 / Mouse 5 as the hold-to-talk key.
+- macOS helper (`macos/DocReaderApp/.../main.swift`): reads `stt.hotkeys`
+  from its existing status poll. Modifier keys reuse the Option gesture
+  logic with the configured flag; plain keys (F-keys, Insert, Home, End,
+  Page Up/Down) and side mouse buttons use a simple down/up path; a custom
+  read-selection chord replaces the legacy gestures only while a custom
+  chord is saved. Anything unparseable keeps the built-in keys.
+
+### Verified on Windows
+
+Recorder flows through the running page (synthetic key and mouse events):
+Right Alt recorded on release, F8 recorded on press, letter refused with the
+"key you don't type with" message, Windows key refused, left click cancels,
+Mouse 4 recorded; chord Ctrl+Shift+R recorded, bare letter refused with "Add
+Ctrl, Alt, or Shift". Live app: helper log shows the rebinding within a
+heartbeat for F8 / Ctrl+Shift+R and for Mouse 5. Tests: 36 pass.
+
+### Not verified: macOS (for Cody)
+
+The Swift change was written on Windows and has not been compiled or run. To
+check it on a Mac:
+
+1. Build with `./build-macos-app` and start the stack as usual.
+2. In the web page, Details > Dictation: the fields should read Option and
+   Control+Option+Command+R. Hold Option: dictation works as before.
+3. Click the Dictation key field, press Right Shift. The helper log
+   (`Console` or the app's dictation log) should say
+   `dictation key now Right Shift`; holding Right Shift records, the
+   overlay says "tap Right Shift to stop".
+4. Click F8 via the chip. Hold F8: records; release: transcribes.
+5. If the mouse has side buttons, record Mouse 4 and hold it.
+6. Click the Read selection field, press Control+Shift+R; select text in any
+   app and press it: the selection is read. Control+Option+Command+R should
+   no longer trigger while the custom chord is set.
+7. Switch back to Option and Control+Option+Command+R with the chips: the
+   log says `read-selection shortcut: built-in`, and the older gestures
+   (right Command tap, Command+L) work again.
+8. Failure mode: set a bad value with
+   `curl -X POST -H 'Content-Type: application/json' -d '{"dictation_key":"a"}' http://127.0.0.1:8766/api/settings`
+   returns 400 with a reason and nothing changes.
