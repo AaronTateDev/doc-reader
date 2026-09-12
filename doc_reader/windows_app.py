@@ -166,8 +166,12 @@ def _spawn(name: str) -> int:
     log_handle = open(log_path, "ab")  # noqa: SIM115 - handed to the child
     creationflags = 0
     if IS_WINDOWS:
+        # CREATE_NO_WINDOW rather than DETACHED_PROCESS: uv/venv python.exe is a
+        # launcher that re-spawns the real interpreter, and a child of a console-less
+        # parent would otherwise allocate a brand new visible console window. A hidden
+        # console is inherited by that child and by ffplay, and outlives the caller.
         creationflags = (
-            subprocess.DETACHED_PROCESS
+            subprocess.CREATE_NO_WINDOW
             | subprocess.CREATE_NEW_PROCESS_GROUP
         )
     process = subprocess.Popen(
@@ -473,7 +477,9 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--no-open", action="store_true", help="Do not open the browser")
     start.add_argument("--quiet", action="store_true")
     sub.add_parser("stop", help="Stop everything")
-    sub.add_parser("restart", help="Stop then start")
+    restart = sub.add_parser("restart", help="Stop then start")
+    restart.add_argument("--no-open", action="store_true", help="Do not open the browser")
+    restart.add_argument("--quiet", action="store_true")
     sub.add_parser("status", help="Show service health")
     sub.add_parser("doctor", help="Check Python, CUDA, Kokoro, ffmpeg, espeak, microphone")
     sub.add_parser("open", help="Open the web app (starting services if needed)")
@@ -497,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     if command == "restart":
         cmd_stop()
         time.sleep(0.5)
-        return cmd_start()
+        return cmd_start(open_browser=not getattr(args, "no_open", False), quiet=getattr(args, "quiet", False))
     if command == "status":
         return cmd_status()
     if command == "doctor":
