@@ -120,3 +120,38 @@ Not verified here: real keyboard Enter/Space activation of list rows (the
 automation harness cannot deliver activating key events, plain buttons
 included); the hold-to-dictate hotkey and paste-into-app path (native helper,
 outside the browser); document import of PDF/DOCX with real files.
+
+## Addendum (2026-09-12): Kokoro voice picker
+
+The footer Voice control was a native `<select>` that only chose the speech
+engine; every Kokoro engine read with `af_heart`. It is now a trigger button
+("Emma", or "Emma (Remote Kokoro)" when the engine is not the local one) that
+opens a popover anchored above it (bottom-left origin, 150 ms ease-out,
+`role="dialog"`):
+
+- "American voices" and "British voices" listboxes: the 28 English Kokoro
+  voices from `doc_reader/kokoro_voices.py`, female then male, each with a
+  checkmark when current and a round play button that fetches
+  `GET /api/voices/preview?voice=<id>` (one short sentence, synthesized once
+  per voice per process, served as `audio/wav`).
+- "Original engine options": a disclosure pinned to the bottom of the
+  scrolling panel that expands the previous engine list (Local fallback,
+  Local Kokoro, Remote Kokoro, strict, Chatterbox, OpenAI API). The current
+  engine's label shows on the collapsed row.
+- Choosing a voice posts `{kokoro_voice, speech_backend}`; if the current
+  engine cannot use Kokoro voices, the engine switches to Local Kokoro.
+  Choosing an engine posts `{speech_backend}` only, as before.
+- Keyboard: focus lands on the current option; ArrowUp/ArrowDown move within
+  visible options; Escape closes and returns focus to the trigger; a pointer
+  press outside closes. Below 720 px the panel becomes a bottom sheet.
+
+Backend: `kokoro_voice` is a validated web setting (catalog ids only);
+`play()` appends `--http-tts-voice` for Kokoro-capable engines; prepared
+Library audio uses the same voice; `tts` state carries `kokoro_voice`,
+`kokoro_voice_label`, `kokoro_backends`, and `voices`.
+
+Verified on the :8790 preview: picker opens/closes, sample playback for Bella,
+choosing Emma persisted and the reader subprocess launched with
+`--http-tts-voice bf_emma`, engine section expand/collapse, Escape and outside
+click, arrow keys, 390x844 sheet, light theme, unknown voice ids rejected
+(400). `python -m unittest discover -s tests`: 26 tests pass.

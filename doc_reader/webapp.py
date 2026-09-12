@@ -30,6 +30,15 @@ from urllib import request as urlrequest
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .extract import iter_document_blocks
+from .kokoro_voices import (
+    DEFAULT_KOKORO_VOICE as DEFAULT_KOKORO_VOICE_ID,
+    KOKORO_BACKENDS,
+    english_voices,
+    is_known_voice,
+    normalize_voice,
+    sample_sentence,
+    voice_label,
+)
 from .platform_tools import (
     IS_WINDOWS,
     LOCAL_KOKORO_LABEL,
@@ -670,6 +679,8 @@ class ReaderService:
                 f"{start_seconds:.2f}",
                 "--verbose",
             ]
+            if backend in KOKORO_BACKENDS:
+                args.extend(["--http-tts-voice", self._kokoro_voice()])
 
             env = os.environ.copy()
             package_root = str(Path(__file__).resolve().parents[1])
@@ -734,6 +745,12 @@ class ReaderService:
                 raise ValueError("Unknown speech backend.")
             settings["speech_backend"] = backend
             self._status = f"Voice: {SPEECH_BACKENDS[backend]}"
+        if "kokoro_voice" in payload:
+            voice = normalize_voice(payload.get("kokoro_voice"))
+            if not voice or not is_known_voice(voice):
+                raise ValueError("Unknown Kokoro voice.")
+            settings["kokoro_voice"] = voice
+            self._status = f"Voice: {voice_label(voice)}"
         if "stt_enabled" in payload:
             settings["stt_enabled"] = bool(payload.get("stt_enabled"))
             self._status = (
@@ -944,9 +961,14 @@ class ReaderService:
 
     def tts_status(self) -> dict[str, Any]:
         backend = self._speech_backend()
+        voice = self._kokoro_voice()
         return {
             "backend": backend,
             "label": SPEECH_BACKENDS.get(backend, backend),
+            "kokoro_voice": voice,
+            "kokoro_voice_label": voice_label(voice),
+            "kokoro_backends": sorted(KOKORO_BACKENDS),
+            "voices": english_voices(),
             "options": [
                 {"value": value, "label": label}
                 for value, label in SPEECH_BACKENDS.items()
@@ -1380,7 +1402,7 @@ class ReaderService:
                 text = _read_text_file(Path(item.source_path))
                 read_rate = self._read_rate()
 
-            audio = _synthesize_library_audio(text, rate=read_rate)
+            audio = _synthesize_library_audio(text, rate=read_rate, voice=self._kokoro_voice())
             audio_path = self.audio_dir / f"{item_id}.wav"
             temp_path = audio_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
             temp_path.write_bytes(audio)
@@ -1509,6 +1531,12 @@ class ReaderService:
             raise FileNotFoundError("Saved recording file not found.")
         content_type = str(settings.get("last_recording_content_type") or "audio/mp4")
         return resolved.read_bytes(), content_type
+
+    def _kokoro_voice(self) -> str:
+        configured = normalize_voice(self._settings().get("kokoro_voice"))
+        if configured:
+            return configured
+        return normalize_voice(os.getenv("DOC_READER_HTTP_TTS_VOICE", "")) or DEFAULT_KOKORO_VOICE_ID
 
     def _speech_backend(self) -> str:
         configured = self._settings().get("speech_backend")
@@ -1788,6 +1816,18 @@ class DocReaderHandler(BaseHTTPRequestHandler):
             return
         if route_path == "/api/state":
             self._send_json(self.reader.state())
+            return
+        if route_path == "/api/voices/preview":
+            query = {key: values[-1] for key, values in parse_qs(parsed.query).items() if values}
+            try:
+                audio = _voice_preview_audio(query.get("voice", ""))
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"ok": False, "error": f"Voice preview failed: {exc}"}, status=HTTPStatus.BAD_GATEWAY)
+                return
+            self._send_binary(audio, content_type="audio/wav")
             return
         if route_path == "/api/metrics":
             self._send_json({"ok": True, "metrics": self.reader.metrics_snapshot()})
@@ -3169,7 +3209,7 @@ def _require_stt_service() -> tuple[str, dict[str, Any]]:
     )
 
 
-def _synthesize_library_audio(text: str, *, rate: int = DEFAULT_RATE) -> bytes:
+def _synthesize_library_audio(text: str, *, rate: int = DEFAULT_RATE, voice: str = "") -> bytes:
     cleaned = str(text or "").strip()
     if not cleaned:
         raise ValueError("No text to synthesize.")
@@ -3200,12 +3240,31 @@ def _synthesize_library_audio(text: str, *, rate: int = DEFAULT_RATE) -> bytes:
                 base_url,
                 text=cleaned,
                 engine=engine,
-                voice=_env("DOC_READER_HTTP_TTS_VOICE", ""),
+                voice=voice or _env("DOC_READER_HTTP_TTS_VOICE", ""),
                 speed=_speed_for_rate(_normalize_read_rate(rate)),
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{base_url}: {exc}")
     raise RuntimeError("Doc Reader local TTS failed: " + " | ".join(failures))
+
+
+_VOICE_PREVIEW_CACHE: dict[str, bytes] = {}
+_VOICE_PREVIEW_LOCK = threading.Lock()
+
+
+def _voice_preview_audio(voice_id: str) -> bytes:
+    """Short spoken sample for one Kokoro voice, synthesized once per process."""
+    voice = normalize_voice(voice_id)
+    if not voice or not is_known_voice(voice):
+        raise ValueError("Unknown Kokoro voice.")
+    with _VOICE_PREVIEW_LOCK:
+        cached = _VOICE_PREVIEW_CACHE.get(voice)
+    if cached:
+        return cached
+    audio = _synthesize_library_audio(sample_sentence(voice), rate=DEFAULT_RATE, voice=voice)
+    with _VOICE_PREVIEW_LOCK:
+        _VOICE_PREVIEW_CACHE[voice] = audio
+    return audio
 
 
 def _synthesize_library_audio_from_url(
@@ -4142,6 +4201,104 @@ INDEX_HTML = r"""<!doctype html>
     .footer-settings .speed input[type="range"] { width: 130px; }
     .footer-settings output { color: var(--ink); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 12ch; }
 
+    /* ---------------------------------------------------------------- voice picker */
+    .voice-picker { position: relative; }
+    #voiceButton { max-width: 260px; }
+    #voiceButton span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #voiceButton svg { width: 14px; height: 14px; color: var(--muted); flex: none; }
+    .voice-menu {
+      position: absolute;
+      left: 0;
+      bottom: calc(100% + 8px);
+      width: 360px;
+      max-height: min(70vh, 640px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      background: var(--surface);
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 8px;
+      z-index: 40;
+      transform-origin: bottom left;
+      transition: opacity 150ms var(--ease-out), transform 150ms var(--ease-out);
+    }
+    @starting-style {
+      .voice-menu { opacity: 0; transform: scale(0.97) translateY(4px); }
+    }
+    .voice-menu-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 6px 8px 8px; }
+    .voice-menu-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+    .voice-groups { display: grid; gap: 6px; }
+    .voice-group-title { color: var(--muted); font-size: 12px; font-weight: 500; padding: 8px 8px 2px; }
+    .voice-list { display: grid; gap: 1px; }
+    .voice-option {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 34px;
+      padding: 4px 6px 4px 8px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+      font: inherit;
+      white-space: normal;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .voice-option:hover { background: var(--editor); }
+    }
+    .voice-option .check { width: 16px; height: 16px; color: var(--accent); opacity: 0; }
+    .voice-option[aria-selected="true"] .check { opacity: 1; }
+    .voice-option[aria-selected="true"] .voice-name { font-weight: 600; }
+    .voice-name { font-size: 13.5px; line-height: 1.25; }
+    .voice-meta { color: var(--muted); font-size: 11.5px; line-height: 1.2; }
+    .voice-preview {
+      width: 28px; min-width: 28px; min-height: 28px; padding: 0;
+      border-radius: 999px;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+    }
+    .voice-preview svg { width: 14px; height: 14px; }
+    .voice-preview.playing { color: var(--accent); border-color: var(--accent); }
+    .voice-preview.playing svg { fill: currentColor; }
+    .voice-preview.loading { opacity: 0.5; }
+    @media (hover: hover) and (pointer: fine) {
+      .voice-preview:hover:not(:disabled) { color: var(--ink); background: var(--bg); border-color: var(--line-strong); }
+    }
+    .voice-original {
+      position: sticky;
+      bottom: -8px;
+      margin: 6px -8px -8px;
+      padding: 6px 8px 8px;
+      background: var(--surface);
+      border-top: 1px solid var(--line);
+    }
+    .voice-disclosure {
+      width: 100%;
+      justify-content: flex-start;
+      border-color: transparent;
+      background: transparent;
+      color: var(--ink);
+      padding: 0 8px;
+      gap: 8px;
+    }
+    .voice-disclosure .chevron { transition: transform 150ms var(--ease-out); }
+    .voice-disclosure[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+    .voice-disclosure .detail { margin-left: auto; }
+    @media (max-width: 720px) {
+      .voice-menu {
+        position: fixed;
+        left: 8px; right: 8px; bottom: 8px;
+        width: auto;
+        max-height: 70vh;
+        transform-origin: bottom center;
+      }
+    }
+
     /* ---------------------------------------------------------------- inspector */
     .inspector {
       width: var(--inspector-w);
@@ -4364,9 +4521,29 @@ INDEX_HTML = r"""<!doctype html>
           </div>
         </div>
         <div class="footer-settings">
-          <div class="field-inline">
-            <label for="voice">Voice</label>
-            <select id="voice"></select>
+          <div class="field-inline voice-field">
+            <label for="voiceButton">Voice</label>
+            <div class="voice-picker">
+              <button id="voiceButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="voiceMenu">
+                <span id="voiceButtonText">Voice</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+              </button>
+              <div id="voiceMenu" class="voice-menu" role="dialog" aria-label="Choose a voice" hidden>
+                <div class="voice-menu-head">
+                  <h3>Kokoro voices</h3>
+                  <span class="detail">English, runs on this PC</span>
+                </div>
+                <div id="voiceGroups" class="voice-groups"></div>
+                <div class="voice-original">
+                  <button id="voiceOriginalToggle" class="voice-disclosure" type="button" aria-expanded="false" aria-controls="voiceOriginalList">
+                    <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+                    <span>Original engine options</span>
+                    <span class="detail" id="voiceOriginalSummary"></span>
+                  </button>
+                  <div id="voiceOriginalList" class="voice-list" role="listbox" aria-label="Engine options" hidden></div>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="field-inline speed">
             <label for="readRate">Speed</label>
@@ -4503,7 +4680,13 @@ INDEX_HTML = r"""<!doctype html>
     const pauseBtn = $("pause");
     const stopBtn = $("stop");
     const playbackStateTextEl = $("playbackStateText");
-    const voiceEl = $("voice");
+    const voiceButtonEl = $("voiceButton");
+    const voiceButtonTextEl = $("voiceButtonText");
+    const voiceMenuEl = $("voiceMenu");
+    const voiceGroupsEl = $("voiceGroups");
+    const voiceOriginalToggleEl = $("voiceOriginalToggle");
+    const voiceOriginalListEl = $("voiceOriginalList");
+    const voiceOriginalSummaryEl = $("voiceOriginalSummary");
     const voiceStatusEl = $("voiceStatus");
     const engineStatusEl = $("engineStatus");
     const readRateEl = $("readRate");
@@ -5046,20 +5229,29 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     // ------------------------------------------------------------ voice, speed
+    const voiceUi = { voices: [], options: [], backend: "", voice: "", kokoroBackends: [], previewAudio: null, previewVoice: "", open: false, signature: "" };
+
     function renderVoice(tts) {
       const current = tts.backend || "auto";
+      voiceUi.backend = current;
+      voiceUi.voice = tts.kokoro_voice || "";
+      voiceUi.kokoroBackends = tts.kokoro_backends || ["local-kokoro"];
+      const voices = Array.isArray(tts.voices) ? tts.voices : [];
       const options = tts.options || [];
-      if (voiceEl.dataset.loaded !== "true" && options.length) {
-        voiceEl.innerHTML = "";
-        for (const option of options) {
-          const entry = document.createElement("option");
-          entry.value = option.value;
-          entry.textContent = option.label;
-          voiceEl.appendChild(entry);
-        }
-        voiceEl.dataset.loaded = "true";
+      const usesKokoro = voiceUi.kokoroBackends.includes(current);
+      const voiceName = (voices.find((v) => v.id === voiceUi.voice) || {}).name || tts.kokoro_voice_label || voiceUi.voice;
+      const voiceTitle = usesKokoro
+        ? (current === "local-kokoro" ? voiceName : `${voiceName} (${tts.label || current})`)
+        : (tts.label || current);
+      voiceButtonTextEl.textContent = voiceTitle;
+      const signature = JSON.stringify([voices, options]);
+      if (voiceUi.signature !== signature) {
+        voiceUi.signature = signature;
+        voiceUi.voices = voices;
+        voiceUi.options = options;
+        buildVoiceMenu();
       }
-      if (document.activeElement !== voiceEl) voiceEl.value = current;
+      syncVoiceSelection();
       const services = tts.services || {};
       const local = services.mac || {};
       const remote = services.umbra || {};
@@ -5067,11 +5259,186 @@ INDEX_HTML = r"""<!doctype html>
       const remoteSpeech = remote.ok ? "remote speech online" : "remote speech offline";
       const device = local.device && (local.device.cuda_device || local.device.requested);
       renderReadiness(engineStatusEl, [
-        ["Voice", tts.label || current, "ok"],
+        ["Voice", voiceTitle, "ok"],
         ["Local speech", local.ok ? `Online${device ? ` · ${device}` : ""}` : "Offline", local.ok ? "ok" : "bad"],
         ["Remote speech", remote.ok ? "Online" : "Not connected", remote.ok ? "ok" : "warn"]
       ]);
       voiceStatusEl.textContent = `${tts.label || current} / ${localSpeech} / ${remoteSpeech}`;
+    }
+
+    function buildVoiceMenu() {
+      voiceGroupsEl.innerHTML = "";
+      const groups = [
+        ["American voices", (v) => v.accent === "US"],
+        ["British voices", (v) => v.accent === "UK"]
+      ];
+      for (const [title, match] of groups) {
+        const members = voiceUi.voices.filter(match);
+        if (!members.length) continue;
+        const heading = document.createElement("div");
+        heading.className = "voice-group-title";
+        heading.textContent = title;
+        const list = document.createElement("div");
+        list.className = "voice-list";
+        list.setAttribute("role", "listbox");
+        list.setAttribute("aria-label", title);
+        for (const voice of members) {
+          list.appendChild(makeVoiceOption(voice));
+        }
+        voiceGroupsEl.append(heading, list);
+      }
+      voiceOriginalListEl.innerHTML = "";
+      for (const option of voiceUi.options) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "voice-option";
+        row.setAttribute("role", "option");
+        row.dataset.backend = option.value;
+        row.innerHTML = '<svg class="check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+        const name = document.createElement("span");
+        name.className = "voice-name";
+        name.textContent = option.label;
+        row.appendChild(name);
+        row.addEventListener("click", () => chooseBackend(option.value));
+        voiceOriginalListEl.appendChild(row);
+      }
+    }
+
+    function makeVoiceOption(voice) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "voice-option";
+      row.setAttribute("role", "option");
+      row.dataset.voice = voice.id;
+      row.innerHTML = '<svg class="check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+      const text = document.createElement("span");
+      const name = document.createElement("div");
+      name.className = "voice-name";
+      name.textContent = voice.name + (voice.default ? " (default)" : "");
+      const meta = document.createElement("div");
+      meta.className = "voice-meta";
+      meta.textContent = `${voice.accent === "UK" ? "British" : "American"}, ${voice.gender}`;
+      text.append(name, meta);
+      const preview = document.createElement("button");
+      preview.type = "button";
+      preview.className = "voice-preview";
+      preview.title = `Play a sample of ${voice.name}`;
+      preview.setAttribute("aria-label", `Play a sample of ${voice.name}`);
+      preview.innerHTML = playIcon();
+      preview.addEventListener("click", (event) => {
+        event.stopPropagation();
+        toggleVoicePreview(voice, preview);
+      });
+      row.append(text, preview);
+      row.addEventListener("click", () => chooseVoice(voice.id));
+      return row;
+    }
+
+    function playIcon() {
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14l11-7z"/></svg>';
+    }
+
+    function stopIcon() {
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+    }
+
+    function syncVoiceSelection() {
+      const usesKokoro = voiceUi.kokoroBackends.includes(voiceUi.backend);
+      for (const row of voiceMenuEl.querySelectorAll(".voice-option[data-voice]")) {
+        row.setAttribute("aria-selected", String(usesKokoro && row.dataset.voice === voiceUi.voice));
+      }
+      for (const row of voiceMenuEl.querySelectorAll(".voice-option[data-backend]")) {
+        row.setAttribute("aria-selected", String(row.dataset.backend === voiceUi.backend));
+      }
+      const currentOption = voiceUi.options.find((o) => o.value === voiceUi.backend);
+      voiceOriginalSummaryEl.textContent = currentOption ? currentOption.label : "";
+    }
+
+    function stopVoicePreview() {
+      if (voiceUi.previewAudio) {
+        try { voiceUi.previewAudio.pause(); } catch (_error) { /* ignore */ }
+      }
+      voiceUi.previewAudio = null;
+      voiceUi.previewVoice = "";
+      for (const button of voiceMenuEl.querySelectorAll(".voice-preview")) {
+        button.classList.remove("playing", "loading");
+        button.innerHTML = playIcon();
+        button.setAttribute("aria-label", button.title);
+      }
+    }
+
+    async function toggleVoicePreview(voice, button) {
+      if (voiceUi.previewVoice === voice.id) {
+        stopVoicePreview();
+        return;
+      }
+      stopVoicePreview();
+      voiceUi.previewVoice = voice.id;
+      button.classList.add("loading");
+      try {
+        const response = await fetch(`/api/voices/preview?voice=${encodeURIComponent(voice.id)}`);
+        if (!response.ok) {
+          let message = `HTTP ${response.status}`;
+          try { message = (await response.json()).error || message; } catch (_error) { /* ignore */ }
+          throw new Error(message);
+        }
+        const blob = await response.blob();
+        if (voiceUi.previewVoice !== voice.id) return;
+        const audio = new Audio(URL.createObjectURL(blob));
+        voiceUi.previewAudio = audio;
+        button.classList.remove("loading");
+        button.classList.add("playing");
+        button.innerHTML = stopIcon();
+        button.setAttribute("aria-label", `Stop sample of ${voice.name}`);
+        audio.addEventListener("ended", () => { if (voiceUi.previewAudio === audio) stopVoicePreview(); });
+        await audio.play();
+      } catch (error) {
+        stopVoicePreview();
+        errorEl.textContent = `Could not play a sample of ${voice.name}: ${error.message}`;
+      }
+    }
+
+    async function chooseVoice(voiceId) {
+      const backend = voiceUi.kokoroBackends.includes(voiceUi.backend) ? voiceUi.backend : "local-kokoro";
+      try {
+        errorEl.textContent = "";
+        render(await api("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kokoro_voice: voiceId, speech_backend: backend })
+        }));
+        setVoiceMenuOpen(false, { restoreFocus: true });
+      } catch (error) {
+        errorEl.textContent = error.message;
+      }
+    }
+
+    async function chooseBackend(value) {
+      try {
+        errorEl.textContent = "";
+        render(await api("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ speech_backend: value })
+        }));
+        setVoiceMenuOpen(false, { restoreFocus: true });
+      } catch (error) {
+        errorEl.textContent = error.message;
+      }
+    }
+
+    function setVoiceMenuOpen(open, { restoreFocus = false } = {}) {
+      voiceUi.open = !!open;
+      voiceMenuEl.hidden = !voiceUi.open;
+      voiceButtonEl.setAttribute("aria-expanded", String(voiceUi.open));
+      if (voiceUi.open) {
+        const selected = voiceMenuEl.querySelector('.voice-option[aria-selected="true"]:not([hidden])') || voiceMenuEl.querySelector(".voice-option");
+        if (selected && !selected.closest("[hidden]")) selected.focus();
+        else voiceMenuEl.querySelector(".voice-option")?.focus();
+      } else {
+        stopVoicePreview();
+        if (restoreFocus) voiceButtonEl.focus();
+      }
     }
 
     function renderReadiness(container, rows) {
@@ -5463,17 +5830,24 @@ INDEX_HTML = r"""<!doctype html>
       }
     });
 
-    voiceEl.addEventListener("change", async () => {
-      try {
-        errorEl.textContent = "";
-        render(await api("/api/settings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ speech_backend: voiceEl.value })
-        }));
-      } catch (error) {
-        errorEl.textContent = error.message;
-      }
+    voiceButtonEl.addEventListener("click", () => setVoiceMenuOpen(!voiceUi.open));
+    voiceOriginalToggleEl.addEventListener("click", () => {
+      const expanded = voiceOriginalToggleEl.getAttribute("aria-expanded") === "true";
+      voiceOriginalToggleEl.setAttribute("aria-expanded", String(!expanded));
+      voiceOriginalListEl.hidden = expanded;
+      if (!expanded) voiceOriginalListEl.scrollIntoView({ block: "nearest" });
+    });
+    voiceMenuEl.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      const options = Array.from(voiceMenuEl.querySelectorAll(".voice-option")).filter((el) => !el.closest("[hidden]"));
+      const index = options.indexOf(document.activeElement.closest(".voice-option"));
+      const next = options[Math.max(0, Math.min(options.length - 1, (index < 0 ? 0 : index) + (event.key === "ArrowDown" ? 1 : -1)))];
+      if (next) { event.preventDefault(); next.focus(); }
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!voiceUi.open) return;
+      if (voiceMenuEl.contains(event.target) || voiceButtonEl.contains(event.target)) return;
+      setVoiceMenuOpen(false);
     });
 
     let readRateSaveTimer = null;
@@ -5607,6 +5981,11 @@ INDEX_HTML = r"""<!doctype html>
 
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
+      if (voiceUi.open) {
+        event.preventDefault();
+        setVoiceMenuOpen(false, { restoreFocus: true });
+        return;
+      }
       if (state.editing) {
         event.preventDefault();
         exitEditMode();

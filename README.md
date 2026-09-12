@@ -192,6 +192,13 @@ The selectable private backends are:
 Mac Kokoro -> Remote Kokoro -> Remote Chatterbox -> macOS say
 ```
 
+The web page's Voice menu lists the 28 English Kokoro voices (American and
+British, female and male) with a play button that speaks a short sample of
+each. The chosen voice is saved with the other web settings and used for
+playback and prepared Library audio. The original engine choices (local
+fallback, remote Kokoro, Chatterbox, OpenAI) sit under "Original engine
+options" at the bottom of the same menu.
+
 Doc Reader cleans Markdown/code-heavy text and splits long passages before they
 reach the neural TTS sidecars. Chatterbox is still available as a selectable
 voice, but the default app path favors Kokoro for steadier document playback.

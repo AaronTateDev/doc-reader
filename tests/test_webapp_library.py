@@ -485,3 +485,70 @@ class WorkspaceRedesignTests(unittest.TestCase):
             self.reader.item_text(item.id)
         payloads = self.reader.library_items()
         self.assertEqual(payloads[0]["title"], "paper.pdf")
+
+
+class KokoroVoicePickerTests(unittest.TestCase):
+    setUp = WebappLibraryTests.setUp
+    tearDown = WebappLibraryTests.tearDown
+    _wait_for_ready = WebappLibraryTests._wait_for_ready
+
+    def test_page_offers_kokoro_voices_and_collapsed_engine_options(self) -> None:
+        self.assertIn('id="voiceButton"', INDEX_HTML)
+        self.assertIn('id="voiceGroups"', INDEX_HTML)
+        self.assertIn("American voices", INDEX_HTML)
+        self.assertIn("British voices", INDEX_HTML)
+        self.assertIn("Original engine options", INDEX_HTML)
+        self.assertIn("/api/voices/preview", INDEX_HTML)
+        self.assertNotIn('<select id="voice">', INDEX_HTML)
+
+    def test_state_lists_english_voices_with_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reader = ReaderService(Path(directory))
+            tts = reader.state()["tts"]
+            ids = [voice["id"] for voice in tts["voices"]]
+            self.assertEqual(tts["kokoro_voice"], "af_heart")
+            self.assertIn("af_bella", ids)
+            self.assertIn("am_michael", ids)
+            self.assertIn("bf_emma", ids)
+            self.assertIn("bm_george", ids)
+            self.assertEqual({v["accent"] for v in tts["voices"]}, {"US", "UK"})
+            self.assertEqual({v["gender"] for v in tts["voices"]}, {"female", "male"})
+            self.assertIn("local-kokoro", tts["kokoro_backends"])
+
+    def test_chosen_voice_persists_and_reaches_speech_service(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reader = ReaderService(Path(directory))
+            reader.update_settings({"kokoro_voice": "BF_Emma", "speech_backend": "tailscale-4090"})
+            self.assertEqual(reader.state()["tts"]["kokoro_voice"], "bf_emma")
+            self.assertEqual(ReaderService(Path(directory)).state()["tts"]["kokoro_voice"], "bf_emma")
+
+            item, queued = reader.upsert_library_item({
+                "source": "clawdad",
+                "source_item_id": "clawdad:voice-test",
+                "kind": "clawdad-message",
+                "text": "Read this in Emma's voice.",
+                "prepare_audio": True,
+            })
+            self.assertTrue(queued)
+            self._wait_for_ready(reader, item.id)
+            speech_calls = [c for c in FakeSpeechHandler.calls if c["path"] == "/v1/audio/speech"]
+            self.assertEqual(speech_calls[0]["payload"]["voice"], "bf_emma")
+
+    def test_unknown_voice_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reader = ReaderService(Path(directory))
+            with self.assertRaises(ValueError):
+                reader.update_settings({"kokoro_voice": "../etc/passwd"})
+            with self.assertRaises(ValueError):
+                reader.update_settings({"kokoro_voice": "zz_nobody"})
+            self.assertEqual(reader.state()["tts"]["kokoro_voice"], "af_heart")
+
+    def test_voice_preview_speaks_sample_with_that_voice(self) -> None:
+        from doc_reader.webapp import _voice_preview_audio
+
+        audio = _voice_preview_audio("am_michael")
+        self.assertTrue(audio.startswith(b"fake-wav:Hi, I'm Michael."))
+        call = [c for c in FakeSpeechHandler.calls if c["path"] == "/v1/audio/speech"][-1]
+        self.assertEqual(call["payload"]["voice"], "am_michael")
+        with self.assertRaises(ValueError):
+            _voice_preview_audio("not a voice")
