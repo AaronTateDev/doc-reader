@@ -260,7 +260,7 @@ def _find_stray_pids(module: str) -> list[int]:
     module_needle = f"-m {module}".replace("'", "''")
     script = (
         "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.CommandLine -and "
+        "Where-Object { $_.CommandLine -and $_.Name -notlike 'powershell*' -and "
         f"$_.CommandLine.IndexOf('{module_needle}', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and "
         f"$_.CommandLine.IndexOf('{marker}', [StringComparison]::OrdinalIgnoreCase) -ge 0 }} | "
         "ForEach-Object { $_.ProcessId }"
