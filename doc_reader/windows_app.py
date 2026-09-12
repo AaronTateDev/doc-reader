@@ -174,8 +174,19 @@ def _spawn(name: str) -> int:
             subprocess.CREATE_NO_WINDOW
             | subprocess.CREATE_NEW_PROCESS_GROUP
         )
+    # The -X marker tags the process with its data folder. Python keeps unknown -X
+    # options in sys._xoptions, and stop_service() only sweeps processes carrying
+    # this exact marker, so two Doc Reader instances on different folders (for
+    # example a preview copy) never stop each other's services.
     process = subprocess.Popen(
-        [_venv_python(windowed=name == "helper"), "-m", service["module"], *service["args"]],
+        [
+            _venv_python(windowed=name == "helper"),
+            "-X",
+            _root_marker(),
+            "-m",
+            service["module"],
+            *service["args"],
+        ],
         cwd=str(REPO_ROOT),
         env=child_env(),
         stdin=subprocess.DEVNULL,
@@ -233,13 +244,25 @@ def stop_service(name: str, *, quiet: bool = False) -> str:
     return f"{service['label']}: stopped"
 
 
+def _root_marker() -> str:
+    return f"doc_reader_root={_root()}"
+
+
 def _find_stray_pids(module: str) -> list[int]:
-    """Find our own service processes even when the PID file is missing."""
+    """Find this data folder's own service processes even when the PID file is missing.
+
+    Only processes started by _spawn() for the same managed root carry the marker;
+    servers started by hand or for another folder are left alone.
+    """
     if not IS_WINDOWS:
         return []
+    marker = _root_marker().replace("'", "''")
+    module_needle = f"-m {module}".replace("'", "''")
     script = (
         "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.CommandLine -and $_.CommandLine -like '*-m " + module + "*' } | "
+        "Where-Object { $_.CommandLine -and "
+        f"$_.CommandLine.IndexOf('{module_needle}', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and "
+        f"$_.CommandLine.IndexOf('{marker}', [StringComparison]::OrdinalIgnoreCase) -ge 0 }} | "
         "ForEach-Object { $_.ProcessId }"
     )
     try:
