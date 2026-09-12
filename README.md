@@ -1,22 +1,24 @@
 # Doc Reader Fork (Windows + macOS)
 
-**This is not the original Doc Reader.** It is a fork of
-[SproutSeeds/doc-reader](https://github.com/SproutSeeds/doc-reader), the
-local-first speech workspace written by Cody Mitchell, maintained here by
-[Aaron Tate](https://github.com/AaronTateDev) to add Windows support and a few
-web-app features. For the original project, its releases, and its author, go to
-the upstream repository.
+**This is not the original Doc Reader.** The original app is Cody Mitchell's:
+[SproutSeeds/doc-reader](https://github.com/SproutSeeds/doc-reader). Cody
+designed and built Doc Reader, the local-first speech workspace, for macOS.
+This fork, kept by [Aaron Tate](https://github.com/AaronTateDev), only adds the
+Windows part: the pieces needed to make the same app install and run on
+Windows, plus a few web-page conveniences that came with that work. Everything
+else, the reader, the speech engines, the Library, the macOS app, is Cody's.
+For the original project and its author, go to the upstream repository.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/SproutSeeds/doc-reader/main/docs/readme-animation.svg" alt="Animated Doc Reader workflow showing local-first speech, dictation, the Library, and the Signal Map" width="760">
 </p>
 
-> **About this fork.** Upstream: SproutSeeds/doc-reader by Cody Mitchell
+> **About this fork.** Original: SproutSeeds/doc-reader by Cody Mitchell
 > (research stewardship: Fractal Research Group, [frg.earth](https://frg.earth)).
-> The upstream project runs on macOS. This fork adds full Windows support and
-> several web-app features while keeping the macOS app working, so one codebase
-> serves both. It keeps the upstream MIT license and Cody's copyright (see
-> `LICENSE`). Main branch: `windows-support`. Repository:
+> Cody's app runs on macOS. This fork makes it Windows-ready and keeps the macOS
+> app working, so one codebase serves both. It keeps the upstream MIT license
+> and Cody's copyright (see `LICENSE`). Main branch: `windows-support`.
+> Repository:
 > [github.com/AaronTateDev/doc-reader-fork](https://github.com/AaronTateDev/doc-reader-fork).
 
 ## What Doc Reader does
@@ -39,7 +41,10 @@ your own computer.
 - **Library and Signal map**: search and filter everything you have read or
   dictated, edit transcripts, and see word counts and topics.
 
-## What this fork adds to the upstream
+## What this fork adds to Cody's app
+
+The app itself is Cody's. These are the Windows additions and the small
+web-page changes made along the way:
 
 | Area | Change |
 | --- | --- |
