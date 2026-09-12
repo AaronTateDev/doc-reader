@@ -96,19 +96,52 @@ def _parse_key(name: str):
     raise ValueError(f"Unknown dictation key: {name}")
 
 
-_pressed_keys: set[Any] = set()
+# Keys we have seen go down but not yet come up, with the time they went down.
+# Only modifiers matter for a clean Ctrl+V, and a key that "went down" long ago
+# is a phantom: its release happened on the lock screen, during sleep, or in an
+# elevated window where the hook cannot see it.
+_pressed_keys: dict[Any, float] = {}
 _pressed_lock = threading.Lock()
+_MODIFIER_NAMES = {"ctrl", "ctrl_l", "ctrl_r", "alt", "alt_l", "alt_r", "alt_gr", "shift", "shift_l", "shift_r", "cmd", "cmd_l", "cmd_r"}
+_PHANTOM_KEY_SECONDS = 5.0
 
 
-def _wait_for_keys_released(max_seconds: float = 1.5) -> None:
-    """Wait until the user lets go of the hotkey so injected shortcuts are clean."""
-    deadline = time.monotonic() + max_seconds
+def _held_modifiers(now: float | None = None) -> list[str]:
+    now = time.monotonic() if now is None else now
+    with _pressed_lock:
+        stale = [key for key, since in _pressed_keys.items() if now - since > _PHANTOM_KEY_SECONDS]
+        for key in stale:
+            _pressed_keys.pop(key, None)
+        return sorted(
+            getattr(key, "name", str(key))
+            for key in _pressed_keys
+            if getattr(key, "name", "") in _MODIFIER_NAMES
+        )
+
+
+def _wait_for_keys_released(max_seconds: float = 0.5) -> float:
+    """Wait (briefly) until modifier keys are up so the injected Ctrl+V is clean.
+
+    Returns the time spent waiting. Never blocks on keys that are not modifiers,
+    and gives up after `max_seconds` so a missed key-up cannot stall every paste.
+    """
+    started = time.monotonic()
+    deadline = started + max_seconds
     while time.monotonic() < deadline:
-        with _pressed_lock:
-            if not _pressed_keys:
-                return
+        held = _held_modifiers()
+        if not held:
+            break
         _process_qt_events()
         time.sleep(0.02)
+    waited = time.monotonic() - started
+    if waited >= max_seconds:
+        print(f"[doc-reader] paste went ahead after {waited:.2f}s; still reported down: {_held_modifiers()}", flush=True)
+    return waited
+
+
+def _forget_pressed_keys() -> None:
+    with _pressed_lock:
+        _pressed_keys.clear()
 
 
 def _process_qt_events() -> None:
@@ -165,18 +198,21 @@ def capture_selected_text() -> str:
     return selected.strip()
 
 
-def paste_text(text: str) -> None:
-    """Insert text into the active field via clipboard paste, then restore the clipboard."""
+def paste_text(text: str) -> float:
+    """Insert text into the active field via clipboard paste, then restore the clipboard.
+
+    Returns the seconds spent waiting for modifier keys to come up.
+    """
     from PySide6.QtCore import QTimer
     from pynput import keyboard
 
     clipboard = _clipboard()
     if clipboard is None:
-        return
+        return 0.0
     previous = clipboard.text()
     clipboard.setText(text)
     _process_qt_events()
-    _wait_for_keys_released()
+    waited = _wait_for_keys_released()
     controller = keyboard.Controller()
     with controller.pressed(keyboard.Key.ctrl):
         controller.press("v")
@@ -190,6 +226,7 @@ def paste_text(text: str) -> None:
             pass
 
     QTimer.singleShot(600, restore)
+    return waited
 
 
 # ------------------------------------------------------------------ microphone
@@ -794,12 +831,16 @@ def main() -> int:
         show_hud("Transcribing…")
         state["last_event"] = "transcribing"
         set_status("Transcribing dictation...")
+        released_at = time.monotonic()
         saved = _save_recording(root, audio, elapsed, peak)
         if saved:
             state["last_recording"] = saved
+        timing["released_at"] = released_at
+        timing["saved_seconds"] = time.monotonic() - released_at
 
         def worker() -> None:
             try:
+                sent_at = time.monotonic()
                 request = urlrequest.Request(
                     f"{WEB_URL}/api/transcribe",
                     data=audio,
@@ -812,6 +853,7 @@ def main() -> int:
                 )
                 with urlrequest.urlopen(request, timeout=TRANSCRIBE_TIMEOUT_SECONDS) as response:
                     payload = json.loads(response.read().decode("utf-8"))
+                timing["request_seconds"] = time.monotonic() - sent_at
                 text = str(payload.get("text") or "").strip() if isinstance(payload, dict) else ""
                 if text:
                     state["last_event"] = "transcription received"
@@ -834,9 +876,18 @@ def main() -> int:
 
     def on_transcript_ready(text: str) -> None:
         show_hud("")
-        paste_text(text)
+        paste_started = time.monotonic()
+        waited = paste_text(text)
         state["last_event"] = "transcription inserted"
         set_status(f"Dictation inserted ({len(text)} chars).")
+        released_at = timing.get("released_at") or paste_started
+        print(
+            "[doc-reader] dictation timing: "
+            f"release->text {time.monotonic() - released_at:.2f}s "
+            f"(save {timing.get('saved_seconds', 0.0):.2f}s, transcribe request {timing.get('request_seconds', 0.0):.2f}s, "
+            f"key wait {waited:.2f}s, paste {time.monotonic() - paste_started - waited:.2f}s)",
+            flush=True,
+        )
 
     bridge.dictationStarted.connect(on_dictation_started)
     bridge.dictationStopped.connect(on_dictation_stopped)
@@ -844,6 +895,7 @@ def main() -> int:
 
     # ---------------------------------------------------------- keyboard listener
     hotkey_state = {"dictation_down": False, "last_selection": 0.0}
+    timing: dict[str, float] = {}
 
     def on_hotkey() -> None:
         now = time.monotonic()
@@ -920,7 +972,7 @@ def main() -> int:
 
     def on_press(key) -> None:  # noqa: ANN001
         with _pressed_lock:
-            _pressed_keys.add(key)
+            _pressed_keys.setdefault(key, time.monotonic())
         try:
             bindings["selection"].press(canonical(key))
         except Exception:  # noqa: BLE001
@@ -931,7 +983,7 @@ def main() -> int:
 
     def on_release(key) -> None:  # noqa: ANN001
         with _pressed_lock:
-            _pressed_keys.discard(key)
+            _pressed_keys.pop(key, None)
         try:
             bindings["selection"].release(canonical(key))
         except Exception:  # noqa: BLE001
@@ -979,6 +1031,7 @@ def main() -> int:
                 if power_events:
                     events = list(power_events)
                     power_events.clear()
+                    _forget_pressed_keys()
                     if "resume" in events:
                         print("[doc-reader] PC resumed; reopening the microphone stream.", flush=True)
                         recorder.reopen(selected_device_index())

@@ -108,5 +108,48 @@ class RecorderStreamRecoveryTests(unittest.TestCase):
         self.assertTrue(FakeStream.instances[0].closed)
 
 
+class PasteKeyWaitTests(unittest.TestCase):
+    """A missed key-up (lock screen, sleep, elevated window) must not stall every paste."""
+
+    def setUp(self) -> None:
+        from doc_reader import windows_helper as helper
+
+        self.helper = helper
+        helper._forget_pressed_keys()
+
+    def tearDown(self) -> None:
+        self.helper._forget_pressed_keys()
+
+    def _key(self, name: str):
+        from pynput.keyboard import Key
+
+        return getattr(Key, name)
+
+    def test_no_keys_down_returns_immediately(self) -> None:
+        waited = self.helper._wait_for_keys_released()
+        self.assertLess(waited, 0.05)
+
+    def test_phantom_modifier_from_long_ago_is_ignored(self) -> None:
+        with self.helper._pressed_lock:
+            self.helper._pressed_keys[self._key("cmd")] = time.monotonic() - 60
+        waited = self.helper._wait_for_keys_released()
+        self.assertLess(waited, 0.05)
+        self.assertEqual(self.helper._held_modifiers(), [])
+
+    def test_non_modifier_keys_never_block(self) -> None:
+        with self.helper._pressed_lock:
+            self.helper._pressed_keys[self._key("f8")] = time.monotonic()
+            self.helper._pressed_keys[self._key("space")] = time.monotonic()
+        waited = self.helper._wait_for_keys_released()
+        self.assertLess(waited, 0.05)
+
+    def test_recent_modifier_waits_only_up_to_the_cap(self) -> None:
+        with self.helper._pressed_lock:
+            self.helper._pressed_keys[self._key("ctrl_r")] = time.monotonic()
+        waited = self.helper._wait_for_keys_released(max_seconds=0.2)
+        self.assertGreaterEqual(waited, 0.2)
+        self.assertLess(waited, 0.45)
+
+
 if __name__ == "__main__":
     unittest.main()
