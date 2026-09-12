@@ -207,3 +207,26 @@ check it on a Mac:
 8. Failure mode: set a bad value with
    `curl -X POST -H 'Content-Type: application/json' -d '{"dictation_key":"a"}' http://127.0.0.1:8766/api/settings`
    returns 400 with a reason and nothing changes.
+
+## Addendum (2026-09-12): dictation after sleep
+
+Symptom: after the PC slept (or the session was locked), every dictation
+transcribed to nothing until the whole stack was restarted. The web log shows
+the cause: the helper posted 44-byte WAV files (a header, no samples) for
+holds of 0.5 to 2 s. The pre-armed PortAudio input stream survives sleep as an
+object but stops delivering callbacks.
+
+Fix in `Recorder` (`doc_reader/windows_helper.py`): every callback stamps
+`last_data_at`; a stream quiet for more than 1.5 s counts as stale, and both
+the heartbeat `arm()` (every 2 s) and `start()` reopen it (closing the old
+stream and re-initialising PortAudio so renumbered devices are picked up). A
+capture that comes back empty for a real hold marks the stream stale, reopens
+it, and tells the user "No audio from the microphone. Try again." instead of
+sending an empty file. A native event filter also catches Windows resume
+(`WM_POWERBROADCAST`) so the stream is reopened right after wake.
+
+Verified: unit tests with a fake stream (5), real-microphone script (arm,
+reopen, capture, stale re-arm). Not verified: an actual sleep/wake cycle,
+which Aaron will see in normal use. Logging out still ends the user session
+and its processes; `run-doc-reader.cmd enable-startup` restarts the stack at
+login.

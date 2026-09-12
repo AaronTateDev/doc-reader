@@ -237,6 +237,10 @@ class Recorder:
     """
 
     BLOCKSIZE = 512  # 32 ms at 16 kHz
+    # An open stream delivers a block every 32 ms. After sleep, screen lock, or an
+    # audio-device reset, PortAudio keeps the stream object but the callbacks stop,
+    # and every recording comes back empty. Treat a longer silence as a dead stream.
+    STALE_SECONDS = 1.5
 
     def __init__(self, *, prearm: bool = True, preroll_seconds: float = 0.3) -> None:
         import collections
@@ -256,10 +260,14 @@ class Recorder:
         self.started_at = 0.0
         self.active = False
         self.last_error = ""
+        self.last_data_at = 0.0
+        self.reopen_count = 0
+        self.captured_seconds = 0.0
 
     def _callback(self, indata, _frames, _time_info, _status) -> None:  # noqa: ANN001
         import numpy as np
 
+        self.last_data_at = time.monotonic()
         chunk = bytes(indata)
         with self._lock:
             if self._capturing:
@@ -273,13 +281,28 @@ class Recorder:
             self.level = min(1.0, rms * 6.0)
             self.peak = max(self.peak, self.level)
 
-    def _open_stream(self, device_index: int | None) -> None:
+    def is_stale(self) -> bool:
+        """True when the stream is open but has stopped delivering audio."""
+        if self._stream is None:
+            return False
+        return time.monotonic() - self.last_data_at > self.STALE_SECONDS
+
+    def _open_stream(self, device_index: int | None, *, force: bool = False) -> None:
         import sounddevice as sd
 
         with self._stream_lock:
-            if self._stream is not None and self._stream_device == device_index:
+            if self._stream is not None and self._stream_device == device_index and not force:
                 return
             self._close_stream_locked()
+            if force:
+                # Re-scan devices: after sleep or a lock/unlock the endpoint PortAudio
+                # bound to may be gone or renumbered.
+                try:
+                    sd._terminate()
+                    sd._initialize()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.reopen_count += 1
             try:
                 stream = sd.InputStream(
                     samplerate=SAMPLE_RATE,
@@ -307,6 +330,7 @@ class Recorder:
                     raise
             self._stream = stream
             self._stream_device = device_index
+            self.last_data_at = time.monotonic()
             with self._lock:
                 self._preroll.clear()
 
@@ -325,11 +349,27 @@ class Recorder:
         return self._stream is not None
 
     def arm(self, device_index: int | None) -> bool:
-        """Open the microphone ahead of time so the next key press starts instantly."""
+        """Open the microphone ahead of time so the next key press starts instantly.
+
+        Called on every heartbeat, so a stream that died while the PC slept is
+        reopened within a couple of seconds of waking.
+        """
         if self.active:
             return True
         try:
-            self._open_stream(device_index)
+            self._open_stream(device_index, force=self.is_stale())
+            self.last_error = ""
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            return False
+
+    def reopen(self, device_index: int | None) -> bool:
+        """Drop and reopen the stream (used right after the PC wakes)."""
+        if self.active:
+            return True
+        try:
+            self._open_stream(device_index, force=True)
             self.last_error = ""
             return True
         except Exception as exc:  # noqa: BLE001
@@ -343,7 +383,9 @@ class Recorder:
             self._close_stream_locked()
 
     def start(self, device_index: int | None) -> None:
-        self._open_stream(device_index)  # instant when already armed on this device
+        # Instant when already armed on this device; reopened first if the armed
+        # stream went quiet (a dead stream would record nothing at all).
+        self._open_stream(device_index, force=self.is_stale())
         with self._lock:
             self._frames = list(self._preroll)
             self._preroll.clear()
@@ -360,6 +402,12 @@ class Recorder:
             self._capturing = False
             raw = b"".join(self._frames)
             self._frames = []
+        self.captured_seconds = len(raw) / 2 / SAMPLE_RATE
+        if elapsed >= 0.2 and self.captured_seconds < min(0.1, elapsed / 2):
+            # The device delivered (almost) nothing for the whole hold: the stream is
+            # dead. Mark it stale so the next arm/start reopens it.
+            self.last_data_at = 0.0
+            self.last_error = "the microphone delivered no audio"
         if not self.prearm:
             with self._stream_lock:
                 self._close_stream_locked()
@@ -427,6 +475,37 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    power_events: list[str] = []
+    try:
+        from PySide6.QtCore import QAbstractNativeEventFilter
+
+        class _PowerFilter(QAbstractNativeEventFilter):
+            """Note Windows sleep/resume so the microphone stream is reopened on wake."""
+
+            WM_POWERBROADCAST = 0x0218
+            PBT_APMSUSPEND = 0x0004
+            PBT_APMRESUMESUSPEND = 0x0007
+            PBT_APMRESUMEAUTOMATIC = 0x0012
+
+            def nativeEventFilter(self, event_type, message):  # noqa: ANN001, N802
+                try:
+                    import ctypes
+                    import ctypes.wintypes as wintypes
+
+                    msg = wintypes.MSG.from_address(int(message))
+                    if msg.message == self.WM_POWERBROADCAST:
+                        if msg.wParam in (self.PBT_APMRESUMESUSPEND, self.PBT_APMRESUMEAUTOMATIC):
+                            power_events.append("resume")
+                        elif msg.wParam == self.PBT_APMSUSPEND:
+                            power_events.append("suspend")
+                except Exception:  # noqa: BLE001
+                    pass
+                return False, 0
+
+        power_filter = _PowerFilter()
+        app.installNativeEventFilter(power_filter)
+    except Exception:  # noqa: BLE001
+        pass
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print("[doc-reader] System tray is not available.")
         return 1
@@ -701,6 +780,17 @@ def main() -> int:
             state["last_event"] = "recording too short"
             set_status("Dictation too short.")
             return
+        if recorder.captured_seconds < min(0.1, elapsed / 2):
+            # Nothing came from the microphone (typical right after sleep). Reopen the
+            # stream now so the next attempt works, and say so instead of sending
+            # an empty file to Whisper.
+            reopened = recorder.reopen(selected_device_index())
+            show_hud("")
+            state["last_event"] = "microphone delivered no audio; stream reopened" if reopened else f"microphone unavailable: {recorder.last_error}"
+            set_status("No audio from the microphone. Try again." if reopened else f"Microphone error: {recorder.last_error}")
+            notify("Doc Reader", "The microphone delivered no audio. It has been reopened, please try again.")
+            print(f"[doc-reader] {state['last_event']} (hold {elapsed:.1f}s)", flush=True)
+            return
         show_hud("Transcribing…")
         state["last_event"] = "transcribing"
         set_status("Transcribing dictation...")
@@ -886,6 +976,15 @@ def main() -> int:
         first = True
         while True:
             try:
+                if power_events:
+                    events = list(power_events)
+                    power_events.clear()
+                    if "resume" in events:
+                        print("[doc-reader] PC resumed; reopening the microphone stream.", flush=True)
+                        recorder.reopen(selected_device_index())
+                        state["last_event"] = "microphone reopened after resume"
+                    elif "suspend" in events:
+                        recorder.disarm()
                 devices = _input_devices()
                 devices_cache[:] = devices
                 active_index = selected_device_index()
@@ -931,8 +1030,12 @@ def main() -> int:
                 # Keep the microphone stream open (idle) so the dictation key starts
                 # capturing immediately instead of waiting for the device to open.
                 if recorder.prearm and state["stt_enabled"]:
+                    was_stale = recorder.is_stale()
                     if not recorder.arm(selected_device_index()) and recorder.last_error:
                         state["last_event"] = f"microphone unavailable: {recorder.last_error}"
+                    elif was_stale:
+                        state["last_event"] = "microphone stream reopened after it went quiet"
+                        print("[doc-reader] microphone stream went quiet (sleep or device reset); reopened.", flush=True)
                 elif recorder.prearm:
                     recorder.disarm()
                 bridge.stateUpdated.emit(
