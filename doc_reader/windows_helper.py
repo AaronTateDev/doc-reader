@@ -302,7 +302,9 @@ class Recorder:
     # silence for a long stretch means we are reading an endpoint that is not the
     # one Windows is actually using (a headset that switched from its dongle to
     # Bluetooth after a lock/unlock, for example).
-    SILENCE_RMS = 0.000015
+    # Peak below ~66 counts (0.2% of full scale) over a whole hold is not a quiet
+    # room, it is an endpoint that is not delivering the microphone at all.
+    SILENCE_PEAK = 0.002
     SILENT_RECHECK_SECONDS = 30.0
     # An open stream delivers a block every 32 ms. After sleep, screen lock, or an
     # audio-device reset, PortAudio keeps the stream object but the callbacks stop,
@@ -331,6 +333,7 @@ class Recorder:
         self.reopen_count = 0
         self.captured_seconds = 0.0
         self.captured_rms = 0.0
+        self.captured_peak = 0.0
         self.last_signal_at = 0.0
         self.device_name = ""
         self.device_index_used: int | None = None
@@ -351,7 +354,7 @@ class Recorder:
         if not samples.size:
             return
         rms = float(np.sqrt(np.mean(samples * samples)))
-        if rms > self.SILENCE_RMS:
+        if float(np.abs(samples).max()) > self.SILENCE_PEAK:
             self.last_signal_at = now
         if capturing:
             self.level = min(1.0, rms * 6.0)
@@ -524,17 +527,19 @@ class Recorder:
             self._frames = []
         self.captured_seconds = len(raw) / 2 / SAMPLE_RATE
         self.captured_rms = 0.0
+        self.captured_peak = 0.0
         if raw:
             import numpy as np
 
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
             self.captured_rms = float(np.sqrt(np.mean(samples * samples)))
+            self.captured_peak = float(np.abs(samples).max())
         if elapsed >= 0.2 and self.captured_seconds < min(0.1, elapsed / 2):
             # The device delivered (almost) nothing for the whole hold: the stream is
             # dead. Mark it stale so the next arm/start reopens it.
             self.last_data_at = 0.0
             self.last_error = "the microphone delivered no audio"
-        elif elapsed >= 0.5 and self.captured_rms <= self.SILENCE_RMS:
+        elif elapsed >= 0.5 and self.captured_peak < self.SILENCE_PEAK:
             # Frames arrived but they are exact silence: we are on the wrong endpoint.
             self.last_data_at = 0.0
             self.last_error = f"the microphone delivered only silence ({self.device_name or 'default device'})"
@@ -946,7 +951,7 @@ def main() -> int:
             state["last_event"] = "recording too short"
             set_status("Dictation too short.")
             return
-        if recorder.captured_seconds < min(0.1, elapsed / 2) or (elapsed >= 0.5 and recorder.captured_rms <= recorder.SILENCE_RMS):
+        if recorder.captured_seconds < min(0.1, elapsed / 2) or (elapsed >= 0.5 and recorder.captured_peak < recorder.SILENCE_PEAK):
             # Nothing, or exact silence, came from the microphone (typical right after
             # sleep, or when the headset moved between its dongle and Bluetooth).
             # Re-scan devices and reopen on Windows' current default so the next
@@ -961,7 +966,7 @@ def main() -> int:
             )
             set_status("No sound from the microphone. Try again." if reopened else f"Microphone error: {recorder.last_error}")
             notify("Doc Reader", f"No sound came from the microphone ({was}). Reopened on {now_on}; please try again.")
-            print(f"[doc-reader] {state['last_event']} (hold {elapsed:.1f}s)", flush=True)
+            print(f"[doc-reader] {state['last_event']} (hold {elapsed:.1f}s, peak {recorder.captured_peak:.4f})", flush=True)
             return
         show_hud("Transcribing…")
         state["last_event"] = "transcribing"

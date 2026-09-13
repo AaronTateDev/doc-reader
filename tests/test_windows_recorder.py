@@ -32,8 +32,9 @@ class FakeStream:
         self.closed = True
 
     def deliver(self, blocks: int = 1) -> None:
+        # int16 little-endian 0x0100 = 256 counts, a clearly audible sample.
         for _ in range(blocks):
-            self.callback(b"\x01\x00" * self.blocksize, self.blocksize, None, None)
+            self.callback(bytes([0, 1]) * self.blocksize, self.blocksize, None, None)
 
 
 class RecorderStreamRecoveryTests(unittest.TestCase):
@@ -165,7 +166,7 @@ class SilentEndpointTests(RecorderStreamRecoveryTests):
         recorder.started_at -= 1.3
         audio, elapsed = recorder.stop()
         self.assertGreater(len(audio), 44)
-        self.assertLessEqual(recorder.captured_rms, recorder.SILENCE_RMS)
+        self.assertLess(recorder.captured_peak, recorder.SILENCE_PEAK)
         self.assertIn("only silence", recorder.last_error)
         self.assertTrue(recorder.is_stale())
         recorder.arm(None)
