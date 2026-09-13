@@ -13,8 +13,9 @@ class FakeStream:
 
     instances: list["FakeStream"] = []
 
-    def __init__(self, *, samplerate, channels, dtype, device, callback, blocksize):
+    def __init__(self, *, samplerate, channels, dtype, device, callback, blocksize, extra_settings=None):
         self.device = device
+        self.extra_settings = extra_settings
         self.callback = callback
         self.blocksize = blocksize
         self.started = False
@@ -149,6 +150,48 @@ class PasteKeyWaitTests(unittest.TestCase):
         waited = self.helper._wait_for_keys_released(max_seconds=0.2)
         self.assertGreaterEqual(waited, 0.2)
         self.assertLess(waited, 0.45)
+
+
+class SilentEndpointTests(RecorderStreamRecoveryTests):
+    """Frames that arrive as exact digital silence mean the wrong endpoint is open."""
+
+    def test_exact_silence_for_a_real_hold_marks_the_stream_for_reopen(self) -> None:
+        recorder = self.Recorder()
+        recorder.arm(None)
+        recorder.start(None)
+        stream = FakeStream.instances[0]
+        for _ in range(40):  # 1.3 s of zero frames
+            stream.callback(b"\x00\x00" * stream.blocksize, stream.blocksize, None, None)
+        recorder.started_at -= 1.3
+        audio, elapsed = recorder.stop()
+        self.assertGreater(len(audio), 44)
+        self.assertLessEqual(recorder.captured_rms, recorder.SILENCE_RMS)
+        self.assertIn("only silence", recorder.last_error)
+        self.assertTrue(recorder.is_stale())
+        recorder.arm(None)
+        self.assertEqual(recorder.reopen_count, 1)
+
+    def test_signal_frames_count_as_a_live_microphone(self) -> None:
+        recorder = self.Recorder()
+        recorder.arm(None)
+        stream = FakeStream.instances[0]
+        stream.callback(b"\x00\x00" * stream.blocksize, stream.blocksize, None, None)
+        time.sleep(0.05)
+        self.assertGreater(recorder.silent_for(), 0.04)
+        stream.deliver()  # non-zero samples
+        self.assertLess(recorder.silent_for(), 0.02)
+
+    def test_reopen_prefers_the_windows_default_via_wasapi(self) -> None:
+        import sounddevice as sd
+
+        sd.query_hostapis = lambda: [{"name": "MME", "default_input_device": 1}, {"name": "Windows WASAPI", "default_input_device": 23}]
+        sd.query_devices = lambda index=None: {"name": f"Device {index}"}
+        sd.default = types.SimpleNamespace(device=[1, 4])
+        sd.WasapiSettings = lambda auto_convert=False: {"auto_convert": auto_convert}
+        recorder = self.Recorder()
+        self.assertTrue(recorder.arm(None))
+        self.assertEqual(recorder.device_index_used, 23)
+        self.assertEqual(recorder.device_name, "Device 23")
 
 
 if __name__ == "__main__":

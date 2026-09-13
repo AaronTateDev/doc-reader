@@ -230,3 +230,26 @@ reopen, capture, stale re-arm). Not verified: an actual sleep/wake cycle,
 which Aaron will see in normal use. Logging out still ends the user session
 and its processes; `run-doc-reader.cmd enable-startup` restarts the stack at
 login.
+
+## Addendum (2026-09-13): follow the Windows default microphone
+
+After a lock/unlock the dictations were still silent even though the stream
+was alive: recordings of 1-100 s had RMS 0.00001 and 77% exact-zero samples,
+the fingerprint of the headset's wireless-dongle endpoint, while Windows'
+default input had become the same headset's Bluetooth endpoint. PortAudio
+only learns about endpoint changes on re-initialisation, and a plain
+`device=None` picks the MME default, not the WASAPI one Windows uses.
+
+Changes in `Recorder`: open Windows' WASAPI default input with automatic
+sample-rate conversion (wireless headsets refuse 16 kHz otherwise), falling
+back to the requested device without conversion and then to PortAudio's
+default; track the last non-silent frame and re-scan/reopen after 30 s of
+exact digital silence while idle; treat a hold whose capture is exact silence
+as a wrong endpoint (reopen, tell the user, do not send it to Whisper);
+report the device actually in use to the web app (`active_microphone_name`,
+shown as "System Default → Headset (PRO X 2)"). The helper registers for
+session-change notifications and reopens 4 s after unlock/logon or resume so a
+reconnecting Bluetooth headset is picked up. HUD while recording: the key
+actually configured, the live microphone name, and a level bar that turns
+into "no sound from the mic" after 1.5 s of silence. Helper log lines carry
+timestamps. Tests: 17 in `tests/test_windows_recorder.py`.

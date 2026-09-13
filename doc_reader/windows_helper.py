@@ -50,6 +50,30 @@ TRANSCRIBE_TIMEOUT_SECONDS = 120.0
 PID_FILE_NAME = "windows-helper.pid"
 
 
+class _TimestampedLog:
+    """Prefix each helper log line with the wall-clock time so events can be placed."""
+
+    def __init__(self, stream) -> None:  # noqa: ANN001
+        self._stream = stream
+        self._at_line_start = True
+
+    def write(self, text: str) -> int:
+        out = []
+        for piece in text.splitlines(keepends=True):
+            if self._at_line_start and piece.strip():
+                out.append(time.strftime("%Y-%m-%d %H:%M:%S ") + piece)
+            else:
+                out.append(piece)
+            self._at_line_start = piece.endswith("\n")
+        return self._stream.write("".join(out))
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def __getattr__(self, name: str):  # noqa: ANN204
+        return getattr(self._stream, name)
+
+
 # ------------------------------------------------------------------ HTTP helpers
 
 
@@ -274,6 +298,12 @@ class Recorder:
     """
 
     BLOCKSIZE = 512  # 32 ms at 16 kHz
+    # A live microphone in a quiet room still has a noise floor. Exact digital
+    # silence for a long stretch means we are reading an endpoint that is not the
+    # one Windows is actually using (a headset that switched from its dongle to
+    # Bluetooth after a lock/unlock, for example).
+    SILENCE_RMS = 0.000015
+    SILENT_RECHECK_SECONDS = 30.0
     # An open stream delivers a block every 32 ms. After sleep, screen lock, or an
     # audio-device reset, PortAudio keeps the stream object but the callbacks stop,
     # and every recording comes back empty. Treat a longer silence as a dead stream.
@@ -300,21 +330,30 @@ class Recorder:
         self.last_data_at = 0.0
         self.reopen_count = 0
         self.captured_seconds = 0.0
+        self.captured_rms = 0.0
+        self.last_signal_at = 0.0
+        self.device_name = ""
+        self.device_index_used: int | None = None
 
     def _callback(self, indata, _frames, _time_info, _status) -> None:  # noqa: ANN001
         import numpy as np
 
-        self.last_data_at = time.monotonic()
+        now = time.monotonic()
+        self.last_data_at = now
         chunk = bytes(indata)
         with self._lock:
-            if self._capturing:
+            capturing = self._capturing
+            if capturing:
                 self._frames.append(chunk)
             else:
                 self._preroll.append(chunk)
-                return
         samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-        if samples.size:
-            rms = float(np.sqrt(np.mean(samples * samples)))
+        if not samples.size:
+            return
+        rms = float(np.sqrt(np.mean(samples * samples)))
+        if rms > self.SILENCE_RMS:
+            self.last_signal_at = now
+        if capturing:
             self.level = min(1.0, rms * 6.0)
             self.peak = max(self.peak, self.level)
 
@@ -324,6 +363,43 @@ class Recorder:
             return False
         return time.monotonic() - self.last_data_at > self.STALE_SECONDS
 
+    def silent_for(self) -> float:
+        """Seconds of exact digital silence from an open stream (0 when a signal is present)."""
+        if self._stream is None:
+            return 0.0
+        return time.monotonic() - self.last_signal_at
+
+    @staticmethod
+    def _wasapi_default_input(sd) -> int | None:  # noqa: ANN001
+        """PortAudio index of the microphone Windows currently calls the default."""
+        try:
+            for api in sd.query_hostapis():
+                if "WASAPI" in str(api.get("name", "")):
+                    index = int(api.get("default_input_device", -1))
+                    return index if index >= 0 else None
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _candidates(self, sd, device_index: int | None) -> list[tuple[int | None, object]]:  # noqa: ANN001
+        """Devices to try, best first: the request via WASAPI (with automatic sample-rate
+        conversion, which the wireless headsets need), then Windows' default input via
+        WASAPI, then PortAudio's plain default."""
+        wasapi = None
+        try:
+            wasapi = sd.WasapiSettings(auto_convert=True)
+        except Exception:  # noqa: BLE001
+            pass
+        candidates: list[tuple[int | None, object]] = []
+        if device_index is not None:
+            candidates.append((device_index, wasapi))
+            candidates.append((device_index, None))
+        default_wasapi = self._wasapi_default_input(sd)
+        if default_wasapi is not None:
+            candidates.append((default_wasapi, wasapi))
+        candidates.append((None, None))
+        return candidates
+
     def _open_stream(self, device_index: int | None, *, force: bool = False) -> None:
         import sounddevice as sd
 
@@ -332,42 +408,49 @@ class Recorder:
                 return
             self._close_stream_locked()
             if force:
-                # Re-scan devices: after sleep or a lock/unlock the endpoint PortAudio
-                # bound to may be gone or renumbered.
+                # Re-scan devices: after sleep, a lock/unlock, or a headset switching
+                # between its dongle and Bluetooth, the endpoint list and Windows'
+                # default change, and PortAudio only notices on re-initialisation.
                 try:
                     sd._terminate()
                     sd._initialize()
                 except Exception:  # noqa: BLE001
                     pass
                 self.reopen_count += 1
-            try:
-                stream = sd.InputStream(
-                    samplerate=SAMPLE_RATE,
-                    channels=1,
-                    dtype="int16",
-                    device=device_index,
-                    callback=self._callback,
-                    blocksize=self.BLOCKSIZE,
-                )
-                stream.start()
-            except Exception:
-                if device_index is not None:
-                    # Selected device failed: fall back to the system default.
+            last_error: Exception | None = None
+            stream = None
+            used: int | None = None
+            for candidate, extra in self._candidates(sd, device_index):
+                try:
+                    kwargs = {"extra_settings": extra} if extra is not None else {}
                     stream = sd.InputStream(
                         samplerate=SAMPLE_RATE,
                         channels=1,
                         dtype="int16",
-                        device=None,
+                        device=candidate,
                         callback=self._callback,
                         blocksize=self.BLOCKSIZE,
+                        **kwargs,
                     )
                     stream.start()
-                    device_index = None
-                else:
-                    raise
+                    used = candidate
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    stream = None
+            if stream is None:
+                raise last_error or RuntimeError("no microphone could be opened")
             self._stream = stream
             self._stream_device = device_index
-            self.last_data_at = time.monotonic()
+            self.device_index_used = used
+            try:
+                resolved = used if used is not None else sd.default.device[0]
+                self.device_name = str(sd.query_devices(resolved).get("name", "")) if resolved is not None and resolved >= 0 else ""
+            except Exception:  # noqa: BLE001
+                self.device_name = ""
+            now = time.monotonic()
+            self.last_data_at = now
+            self.last_signal_at = now
             with self._lock:
                 self._preroll.clear()
 
@@ -440,11 +523,21 @@ class Recorder:
             raw = b"".join(self._frames)
             self._frames = []
         self.captured_seconds = len(raw) / 2 / SAMPLE_RATE
+        self.captured_rms = 0.0
+        if raw:
+            import numpy as np
+
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            self.captured_rms = float(np.sqrt(np.mean(samples * samples)))
         if elapsed >= 0.2 and self.captured_seconds < min(0.1, elapsed / 2):
             # The device delivered (almost) nothing for the whole hold: the stream is
             # dead. Mark it stale so the next arm/start reopens it.
             self.last_data_at = 0.0
             self.last_error = "the microphone delivered no audio"
+        elif elapsed >= 0.5 and self.captured_rms <= self.SILENCE_RMS:
+            # Frames arrived but they are exact silence: we are on the wrong endpoint.
+            self.last_data_at = 0.0
+            self.last_error = f"the microphone delivered only silence ({self.device_name or 'default device'})"
         if not self.prearm:
             with self._stream_lock:
                 self._close_stream_locked()
@@ -510,6 +603,7 @@ def main() -> int:
         return 0
     pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
+    sys.stdout = _TimestampedLog(sys.stdout)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     power_events: list[str] = []
@@ -523,6 +617,10 @@ def main() -> int:
             PBT_APMSUSPEND = 0x0004
             PBT_APMRESUMESUSPEND = 0x0007
             PBT_APMRESUMEAUTOMATIC = 0x0012
+            WM_WTSSESSION_CHANGE = 0x02B1
+            WTS_CONSOLE_CONNECT = 0x1
+            WTS_SESSION_LOGON = 0x5
+            WTS_SESSION_UNLOCK = 0x8
 
             def nativeEventFilter(self, event_type, message):  # noqa: ANN001, N802
                 try:
@@ -535,6 +633,9 @@ def main() -> int:
                             power_events.append("resume")
                         elif msg.wParam == self.PBT_APMSUSPEND:
                             power_events.append("suspend")
+                    elif msg.message == self.WM_WTSSESSION_CHANGE:
+                        if msg.wParam in (self.WTS_CONSOLE_CONNECT, self.WTS_SESSION_LOGON, self.WTS_SESSION_UNLOCK):
+                            power_events.append("unlock")
                 except Exception:  # noqa: BLE001
                     pass
                 return False, 0
@@ -599,10 +700,17 @@ def main() -> int:
             geometry = screen.availableGeometry()
             x = geometry.center().x() - hud.width() // 2
             y = geometry.bottom() - hud.height() - 60
-            hud.move(x, y)
+            if not hud.isVisible() or abs(hud.x() - x) > 40:
+                hud.move(x, y)
         hud.show()
 
     bridge.hudText.connect(show_hud)
+    try:
+        import ctypes
+
+        ctypes.windll.wtsapi32.WTSRegisterSessionNotification(int(hud.winId()), 0)  # NOTIFY_FOR_THIS_SESSION
+    except Exception:  # noqa: BLE001
+        pass
 
     # ---------------------------------------------------------- tray
     tray = QSystemTrayIcon(_build_icon(), app)
@@ -801,14 +909,35 @@ def main() -> int:
             set_status(f"Microphone error: {exc}")
             notify("Doc Reader", f"Could not start recording: {exc}")
             return
-        show_hud(f"●  Recording…  release {dictation_hotkey_label()} to transcribe")
+        hud_state["recording_since"] = time.monotonic()
+        render_recording_hud()
+        level_timer.start()
         state["last_event"] = "recording started"
         tray.setIcon(_build_icon(recording=True))
         set_status("Recording dictation...")
 
+    def render_recording_hud() -> None:
+        """Recording HUD: key to release, which microphone, and a live level bar."""
+        key_name = dictation_hotkey_label(bindings["dictation_name"])
+        device = recorder.device_name or "default microphone"
+        filled = max(0, min(10, int(round(recorder.level * 10))))
+        quiet_for = time.monotonic() - max(recorder.last_signal_at, hud_state.get("recording_since", 0.0))
+        if recorder.level <= 0.0 and quiet_for > 1.5:
+            meter = "<span style='color:#F0B45C'>no sound from the mic</span>"
+        else:
+            meter = (
+                f"<span style='color:#62D0BC'>{'▮' * filled}</span>"
+                f"<span style='color:#4b5a55'>{'▮' * (10 - filled)}</span>"
+            )
+        show_hud(
+            f"<span style='color:#e5484d'>●</span>&nbsp; Recording &nbsp;{meter}&nbsp; "
+            f"<span style='color:#b0b8c4'>{device}</span> &nbsp;·&nbsp; release {key_name} to transcribe"
+        )
+
     def on_dictation_stopped() -> None:
         if not recorder.active:
             return
+        level_timer.stop()
         audio, elapsed = recorder.stop()
         tray.setIcon(_build_icon())
         peak = recorder.peak
@@ -817,15 +946,21 @@ def main() -> int:
             state["last_event"] = "recording too short"
             set_status("Dictation too short.")
             return
-        if recorder.captured_seconds < min(0.1, elapsed / 2):
-            # Nothing came from the microphone (typical right after sleep). Reopen the
-            # stream now so the next attempt works, and say so instead of sending
-            # an empty file to Whisper.
+        if recorder.captured_seconds < min(0.1, elapsed / 2) or (elapsed >= 0.5 and recorder.captured_rms <= recorder.SILENCE_RMS):
+            # Nothing, or exact silence, came from the microphone (typical right after
+            # sleep, or when the headset moved between its dongle and Bluetooth).
+            # Re-scan devices and reopen on Windows' current default so the next
+            # attempt works, and say so instead of sending silence to Whisper.
+            was = recorder.device_name or "default device"
             reopened = recorder.reopen(selected_device_index())
+            now_on = recorder.device_name or "default device"
             show_hud("")
-            state["last_event"] = "microphone delivered no audio; stream reopened" if reopened else f"microphone unavailable: {recorder.last_error}"
-            set_status("No audio from the microphone. Try again." if reopened else f"Microphone error: {recorder.last_error}")
-            notify("Doc Reader", "The microphone delivered no audio. It has been reopened, please try again.")
+            state["last_event"] = (
+                f"microphone gave no sound on {was}; reopened on {now_on}" if reopened
+                else f"microphone unavailable: {recorder.last_error}"
+            )
+            set_status("No sound from the microphone. Try again." if reopened else f"Microphone error: {recorder.last_error}")
+            notify("Doc Reader", f"No sound came from the microphone ({was}). Reopened on {now_on}; please try again.")
             print(f"[doc-reader] {state['last_event']} (hold {elapsed:.1f}s)", flush=True)
             return
         show_hud("Transcribing…")
@@ -896,6 +1031,10 @@ def main() -> int:
     # ---------------------------------------------------------- keyboard listener
     hotkey_state = {"dictation_down": False, "last_selection": 0.0}
     timing: dict[str, float] = {}
+    hud_state: dict[str, float] = {}
+    level_timer = QTimer()
+    level_timer.setInterval(70)
+    level_timer.timeout.connect(lambda: render_recording_hud() if recorder.active else level_timer.stop())
 
     def on_hotkey() -> None:
         now = time.monotonic()
@@ -1024,6 +1163,8 @@ def main() -> int:
     guard_timer.start()
 
     # ---------------------------------------------------------- heartbeat
+    reopen_deadline: dict[str, Any] = {"at": 0.0, "why": ""}
+
     def heartbeat_loop() -> None:
         first = True
         while True:
@@ -1032,18 +1173,24 @@ def main() -> int:
                     events = list(power_events)
                     power_events.clear()
                     _forget_pressed_keys()
-                    if "resume" in events:
-                        print("[doc-reader] PC resumed; reopening the microphone stream.", flush=True)
-                        recorder.reopen(selected_device_index())
-                        state["last_event"] = "microphone reopened after resume"
+                    if "resume" in events or "unlock" in events:
+                        # Give Bluetooth headsets a moment to reconnect, then re-scan and
+                        # reopen on whatever Windows now calls the default microphone.
+                        reopen_deadline["at"] = time.monotonic() + 4.0
+                        reopen_deadline["why"] = "PC resumed" if "resume" in events else "session unlocked"
                     elif "suspend" in events:
                         recorder.disarm()
+                if reopen_deadline["at"] and time.monotonic() >= reopen_deadline["at"] and not recorder.active:
+                    why = reopen_deadline["why"]
+                    reopen_deadline["at"] = 0.0
+                    recorder.reopen(selected_device_index())
+                    print(f"[doc-reader] {why}; microphone reopened on {recorder.device_name or 'default device'}.", flush=True)
+                    state["last_event"] = f"microphone reopened after {why}"
                 devices = _input_devices()
                 devices_cache[:] = devices
-                active_index = selected_device_index()
                 active_id = ""
                 for device in devices:
-                    if device["index"] == active_index:
+                    if recorder.device_name and device["name"] == recorder.device_name:
                         active_id = device["id"]
                 payload: dict[str, Any] = {
                     "devices": [{"id": d["id"], "name": d["name"]} for d in devices],
@@ -1051,6 +1198,7 @@ def main() -> int:
                     "input_monitoring_trusted": True,
                     "accessibility_trusted": True,
                     "active_microphone_id": active_id,
+                    "active_microphone_name": recorder.device_name,
                     "recording": bool(recorder.active),
                     "recording_start_pending": False,
                     "last_dictation_event": "native helper started" if first else state["last_event"],
@@ -1088,7 +1236,11 @@ def main() -> int:
                         state["last_event"] = f"microphone unavailable: {recorder.last_error}"
                     elif was_stale:
                         state["last_event"] = "microphone stream reopened after it went quiet"
-                        print("[doc-reader] microphone stream went quiet (sleep or device reset); reopened.", flush=True)
+                        print(f"[doc-reader] microphone stream went quiet (sleep or device reset); reopened on {recorder.device_name or 'default device'}.", flush=True)
+                    elif not recorder.active and recorder.silent_for() > recorder.SILENT_RECHECK_SECONDS:
+                        was = recorder.device_name or "default device"
+                        if recorder.reopen(selected_device_index()):
+                            print(f"[doc-reader] {was} gave exact silence for {recorder.SILENT_RECHECK_SECONDS:.0f}s; re-scanned, now on {recorder.device_name or 'default device'}.", flush=True)
                 elif recorder.prearm:
                     recorder.disarm()
                 bridge.stateUpdated.emit(

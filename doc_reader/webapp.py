@@ -932,6 +932,7 @@ class ReaderService:
         settings = self._settings()
         settings["native_dictation_status_at"] = 0
         settings["active_microphone_id"] = ""
+        settings["active_microphone_name"] = ""
         settings["recording"] = False
         settings["recording_start_pending"] = False
         settings["audio_level"] = 0
@@ -958,6 +959,7 @@ class ReaderService:
             "input_monitoring_trusted",
             "accessibility_trusted",
             "active_microphone_id",
+            "active_microphone_name",
             "recording",
             "recording_start_pending",
             "last_dictation_event",
@@ -3083,6 +3085,7 @@ def _microphone_payload(settings: dict[str, Any]) -> dict[str, Any]:
         "preferred_id": preferred_device["id"] if preferred_device is not None else "",
         "preferred_name": preferred_device["name"] if preferred_device is not None else "",
         "active_id": str(settings.get("active_microphone_id") or ""),
+        "active_name": str(settings.get("active_microphone_name") or ""),
         "native_helper_online": native_helper_online,
         "native_status_age_seconds": native_age_seconds,
         "recording": bool(settings.get("recording")),
@@ -5898,7 +5901,7 @@ INDEX_HTML = r"""<!doctype html>
       const rows = [
         ["Engine", engineValue, service.ok && stt.ready ? "ok" : "bad"],
         ["Helper", helperValue, mic.native_helper_online ? "ok" : "warn"],
-        ["Microphone", `${mic.selected_name || "System Default"} · ${permission}`, mic.authorization === "authorized" ? "ok" : "warn"],
+        ["Microphone", `${microphoneSummary(mic)} · ${permission}`, mic.authorization === "authorized" ? "ok" : "warn"],
         ["Paste into apps", mic.accessibility_trusted ? "Allowed" : "Not allowed yet", mic.accessibility_trusted ? "ok" : "warn"],
         ["Hotkey", mic.input_monitoring_trusted ? "Allowed" : "Allow Input Monitoring", mic.input_monitoring_trusted ? "ok" : "warn"],
         ["Last event", mic.last_event || "", current.key === "error" ? "bad" : ""]
@@ -5960,6 +5963,13 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
 
+    function microphoneSummary(mic) {
+      const chosen = mic.selected_name || "System Default";
+      const live = mic.active_name || "";
+      if (live && live !== chosen && mic.native_helper_online) return `${chosen} → ${live}`;
+      return chosen;
+    }
+
     function renderMicrophones(mic) {
       const devices = mic.devices || [{ id: "", name: "System Default" }];
       const signature = JSON.stringify(devices);
@@ -5975,7 +5985,8 @@ INDEX_HTML = r"""<!doctype html>
       }
       if (document.activeElement !== microphoneEl) microphoneEl.value = mic.selected_id || "";
       const preferred = mic.preferred_name && mic.preferred_name !== mic.selected_name ? ` · preferred: ${mic.preferred_name}` : "";
-      microphoneStatusEl.textContent = `${mic.selected_name || "System Default"}${preferred}`;
+      const live = mic.active_name && mic.native_helper_online ? ` · live: ${mic.active_name}` : "";
+      microphoneStatusEl.textContent = `${mic.selected_name || "System Default"}${preferred}${live}`;
     }
 
     // ------------------------------------------------------------ signal map
