@@ -696,6 +696,7 @@ def main() -> int:
         selectionRequested = Signal()
         dictationStarted = Signal()
         dictationStopped = Signal()
+        dictationCancelled = Signal(str)
         transcriptReady = Signal(str)
         statusText = Signal(str)
         hudText = Signal(str)
@@ -954,8 +955,9 @@ def main() -> int:
             notify("Doc Reader", f"Could not start recording: {exc}")
             return
         hud_state["recording_since"] = time.monotonic()
-        render_recording_hud()
-        level_timer.start()
+        # Show the HUD only once the key has been held for a moment, so a quick
+        # Ctrl+C never flashes "Recording" on screen.
+        QTimer.singleShot(150, lambda: (render_recording_hud(), level_timer.start()) if recorder.active else None)
         state["last_event"] = "recording started"
         tray.setIcon(_build_icon(recording=True))
         set_status("Recording dictation...")
@@ -977,6 +979,16 @@ def main() -> int:
             f"<span style='color:#e5484d'>●</span>&nbsp; Recording &nbsp;{meter}&nbsp; "
             f"<span style='color:#b0b8c4'>{device}</span> &nbsp;·&nbsp; release {key_name} to transcribe"
         )
+
+    def on_dictation_cancelled(other_key: str) -> None:
+        if not recorder.active:
+            return
+        level_timer.stop()
+        recorder.stop()
+        tray.setIcon(_build_icon())
+        show_hud("")
+        state["last_event"] = f"dictation cancelled: {dictation_hotkey_label(bindings['dictation_name'])}+{other_key} is a shortcut"
+        set_status("Doc Reader ready.")
 
     def on_dictation_stopped() -> None:
         if not recorder.active:
@@ -1070,6 +1082,7 @@ def main() -> int:
 
     bridge.dictationStarted.connect(on_dictation_started)
     bridge.dictationStopped.connect(on_dictation_stopped)
+    bridge.dictationCancelled.connect(on_dictation_cancelled)
     bridge.transcriptReady.connect(on_transcript_ready)
 
     # ---------------------------------------------------------- keyboard listener
@@ -1153,18 +1166,40 @@ def main() -> int:
         listener = listener_holder.get("listener")
         return listener.canonical(key) if listener is not None else key
 
+    def _other_keys_held(except_key) -> list[str]:  # noqa: ANN001
+        """Keys the user is holding right now besides `except_key` (recent ones only)."""
+        now = time.monotonic()
+        with _pressed_lock:
+            return [
+                getattr(k, "name", None) or getattr(k, "char", None) or str(k)
+                for k, since in _pressed_keys.items()
+                if k != except_key and now - since < _PHANTOM_KEY_SECONDS
+            ]
+
     def on_press(key) -> None:  # noqa: ANN001
         if _is_injecting():
             return  # our own Ctrl+V or typed text, not the user
+        held_before = _other_keys_held(key)
         with _pressed_lock:
             _pressed_keys.setdefault(key, time.monotonic())
         try:
             bindings["selection"].press(canonical(key))
         except Exception:  # noqa: BLE001
             pass
-        if key in bindings["dictation_keys"] and not hotkey_state["dictation_down"]:
+        if key in bindings["dictation_keys"]:
+            if hotkey_state["dictation_down"]:
+                return
+            if held_before:
+                # Something else was already down (Win+Ctrl, Shift+Ctrl): a chord for
+                # another program, not a request to dictate.
+                return
             hotkey_state["dictation_down"] = True
             bridge.dictationStarted.emit()
+        elif hotkey_state["dictation_down"] and bindings["dictation_mouse"] is None:
+            # The dictation key is held and another key joined it: Ctrl+C, Ctrl+Win...
+            # That is a keyboard shortcut, so drop the recording quietly.
+            hotkey_state["dictation_down"] = False
+            bridge.dictationCancelled.emit(getattr(key, "name", None) or getattr(key, "char", None) or str(key))
 
     def on_release(key) -> None:  # noqa: ANN001
         if _is_injecting():
