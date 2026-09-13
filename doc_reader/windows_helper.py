@@ -222,34 +222,73 @@ def capture_selected_text() -> str:
     return selected.strip()
 
 
-def paste_text(text: str) -> float:
-    """Insert text into the active field via clipboard paste, then restore the clipboard.
+# While we inject keystrokes ourselves (Ctrl+V, or typing the text), the hotkey hook
+# must not treat them as the user pressing the dictation key.
+_injecting: dict[str, float] = {"until": 0.0}
 
-    Returns the seconds spent waiting for modifier keys to come up.
+
+def _is_injecting() -> bool:
+    return time.monotonic() < _injecting["until"]
+
+
+def _set_clipboard_text(clipboard, text: str, attempts: int = 8) -> bool:  # noqa: ANN001
+    """Put text on the clipboard and confirm it is there.
+
+    Another program (a second dictation tool restoring its own clipboard, a
+    clipboard manager) can hold the clipboard open for a moment; then the set
+    silently does nothing and Ctrl+V would paste whatever was there before.
+    """
+    for attempt in range(attempts):
+        try:
+            clipboard.setText(text)
+            _process_qt_events()
+            if clipboard.text() == text:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.04 * (attempt + 1))
+    return False
+
+
+def paste_text(text: str) -> float:
+    """Insert text into the active field, then restore the clipboard.
+
+    Clipboard paste (Ctrl+V) is the primary path because it is instant and works in
+    every editor. If the clipboard cannot be claimed, the text is typed directly with
+    Unicode key events instead of being dropped. Returns the seconds spent waiting
+    for modifier keys to come up.
     """
     from PySide6.QtCore import QTimer
     from pynput import keyboard
 
     clipboard = _clipboard()
-    if clipboard is None:
-        return 0.0
-    previous = clipboard.text()
-    clipboard.setText(text)
-    _process_qt_events()
-    waited = _wait_for_keys_released()
     controller = keyboard.Controller()
-    with controller.pressed(keyboard.Key.ctrl):
-        controller.press("v")
-        controller.release("v")
+    previous = clipboard.text() if clipboard is not None else ""
+    placed = clipboard is not None and _set_clipboard_text(clipboard, text)
+    waited = _wait_for_keys_released()
+    _injecting["until"] = time.monotonic() + 1.0
+    try:
+        if placed:
+            with controller.pressed(keyboard.Key.ctrl):
+                controller.press("v")
+                controller.release("v")
+            method = "clipboard paste"
+        else:
+            controller.type(text)
+            method = "typed directly (clipboard was busy)"
+    finally:
+        _injecting["until"] = time.monotonic() + 0.3
+    print(f"[doc-reader] inserted {len(text)} chars via {method}", flush=True)
 
     def restore() -> None:
         try:
-            if clipboard.text() == text:
+            if placed and clipboard.text() == text:
                 clipboard.setText(previous)
         except Exception:  # noqa: BLE001
             pass
 
-    QTimer.singleShot(600, restore)
+    # Restore late enough that a slow target window has read the clipboard.
+    QTimer.singleShot(1500, restore)
     return waited
 
 
@@ -1115,6 +1154,8 @@ def main() -> int:
         return listener.canonical(key) if listener is not None else key
 
     def on_press(key) -> None:  # noqa: ANN001
+        if _is_injecting():
+            return  # our own Ctrl+V or typed text, not the user
         with _pressed_lock:
             _pressed_keys.setdefault(key, time.monotonic())
         try:
@@ -1126,6 +1167,8 @@ def main() -> int:
             bridge.dictationStarted.emit()
 
     def on_release(key) -> None:  # noqa: ANN001
+        if _is_injecting():
+            return
         with _pressed_lock:
             _pressed_keys.pop(key, None)
         try:

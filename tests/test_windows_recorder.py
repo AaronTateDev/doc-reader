@@ -195,5 +195,46 @@ class SilentEndpointTests(RecorderStreamRecoveryTests):
         self.assertEqual(recorder.device_name, "Device 23")
 
 
+class ClipboardInsertTests(unittest.TestCase):
+    """Text must land even when another program is holding the clipboard."""
+
+    class BusyClipboard:
+        def __init__(self, busy_for: int) -> None:
+            self.busy_for = busy_for
+            self.value = "old"
+            self.sets = 0
+
+        def text(self) -> str:
+            return self.value
+
+        def setText(self, value: str) -> None:  # noqa: N802
+            self.sets += 1
+            if self.sets > self.busy_for:
+                self.value = value
+
+    def test_clipboard_set_is_verified_and_retried(self) -> None:
+        from doc_reader import windows_helper as helper
+
+        clipboard = self.BusyClipboard(busy_for=3)
+        self.assertTrue(helper._set_clipboard_text(clipboard, "hello"))
+        self.assertEqual(clipboard.value, "hello")
+        self.assertEqual(clipboard.sets, 4)
+
+    def test_permanently_busy_clipboard_reports_failure(self) -> None:
+        from doc_reader import windows_helper as helper
+
+        clipboard = self.BusyClipboard(busy_for=99)
+        self.assertFalse(helper._set_clipboard_text(clipboard, "hello", attempts=3))
+        self.assertEqual(clipboard.value, "old")
+
+    def test_injected_keys_are_ignored_by_the_hook_window(self) -> None:
+        from doc_reader import windows_helper as helper
+
+        helper._injecting["until"] = time.monotonic() + 0.2
+        self.assertTrue(helper._is_injecting())
+        helper._injecting["until"] = 0.0
+        self.assertFalse(helper._is_injecting())
+
+
 if __name__ == "__main__":
     unittest.main()
