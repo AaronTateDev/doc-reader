@@ -8,6 +8,7 @@
     "read-docs": "bin/read-docs.js"
   },
   "files": [
+    "assets/",
     "bin/",
     "build-macos-app",
     "doc_reader/",

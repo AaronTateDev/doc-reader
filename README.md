@@ -131,6 +131,8 @@ Useful commands:
 .\run-doc-reader.cmd doctor          # Python, CUDA, Kokoro, ffmpeg, espeak, microphone checks
 .\run-doc-reader.cmd enable-startup  # launch at login
 .\run-doc-reader.cmd disable-startup
+.\run-doc-reader.cmd install-shortcuts  # clickable "Doc Reader" on the Desktop and in the Start menu
+.\run-doc-reader.cmd remove-shortcuts
 .\run-doc-reader.cmd cli .\paper.pdf --mode smart   # command-line reader
 ```
 
