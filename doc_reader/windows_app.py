@@ -313,23 +313,26 @@ def _startup_shortcut() -> Path:
     return _startup_dir() / STARTUP_SHORTCUT_NAME
 
 
-def enable_startup() -> int:
-    if not IS_WINDOWS:
-        print("[doc-reader] enable-startup is a Windows command.")
-        return 1
-    shortcut = _startup_shortcut()
+def _icon_path() -> Path:
+    return REPO_ROOT / "assets" / "doc-reader.ico"
+
+
+def _create_shortcut(shortcut: Path, arguments: str, description: str) -> str:
+    """Write a Windows .lnk that runs the launcher without a console window. Returns an error or ""."""
     shortcut.parent.mkdir(parents=True, exist_ok=True)
     target = _venv_python(windowed=True)
-    arguments = "-m doc_reader.windows_app start --no-open --quiet"
+    icon = _icon_path()
+    ps_quote = lambda value: str(value).replace("'", "''")  # noqa: E731
     script = (
         "$shell = New-Object -ComObject WScript.Shell; "
-        f"$s = $shell.CreateShortcut('{shortcut}'); "
-        f"$s.TargetPath = '{target}'; "
-        f"$s.Arguments = '{arguments}'; "
-        f"$s.WorkingDirectory = '{REPO_ROOT}'; "
+        f"$s = $shell.CreateShortcut('{ps_quote(shortcut)}'); "
+        f"$s.TargetPath = '{ps_quote(target)}'; "
+        f"$s.Arguments = '{ps_quote(arguments)}'; "
+        f"$s.WorkingDirectory = '{ps_quote(REPO_ROOT)}'; "
         "$s.WindowStyle = 7; "
-        "$s.Description = 'Doc Reader local speech workspace'; "
-        "$s.Save()"
+        f"$s.Description = '{ps_quote(description)}'; "
+        + (f"$s.IconLocation = '{ps_quote(icon)},0'; " if icon.is_file() else "")
+        + "$s.Save()"
     )
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -339,7 +342,77 @@ def enable_startup() -> int:
         **popen_hidden_kwargs(),
     )
     if result.returncode != 0 or not shortcut.exists():
-        print(f"[doc-reader] Could not create startup shortcut: {result.stderr.strip()}")
+        return result.stderr.strip() or "shortcut was not written"
+    return ""
+
+
+def _special_folder(name: str) -> Path:
+    """Resolve a Windows shell folder (Desktop may live under OneDrive)."""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", f"[Environment]::GetFolderPath('{name}')"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+            **popen_hidden_kwargs(),
+        )
+        value = (result.stdout or "").strip()
+        if value:
+            return Path(value)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return Path.home() / name
+
+
+def _launcher_shortcuts() -> list[Path]:
+    return [
+        _special_folder("Desktop") / STARTUP_SHORTCUT_NAME,
+        _special_folder("StartMenu") / "Programs" / STARTUP_SHORTCUT_NAME,
+    ]
+
+
+def install_shortcuts() -> int:
+    """Put a clickable Doc Reader on the Desktop and in the Start menu."""
+    if not IS_WINDOWS:
+        print("[doc-reader] install-shortcuts is a Windows command.")
+        return 1
+    code = 0
+    for shortcut in _launcher_shortcuts():
+        error = _create_shortcut(
+            shortcut,
+            "-m doc_reader.windows_app open",
+            "Doc Reader: read documents aloud and dictate anywhere (starts the services if needed)",
+        )
+        if error:
+            print(f"[doc-reader] Could not create {shortcut}: {error}")
+            code = 1
+        else:
+            print(f"[doc-reader] Shortcut created: {shortcut}")
+    return code
+
+
+def remove_shortcuts() -> int:
+    for shortcut in _launcher_shortcuts():
+        try:
+            shortcut.unlink()
+            print(f"[doc-reader] Removed {shortcut}")
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"[doc-reader] Could not remove {shortcut}: {exc}")
+            return 1
+    return 0
+
+
+def enable_startup() -> int:
+    if not IS_WINDOWS:
+        print("[doc-reader] enable-startup is a Windows command.")
+        return 1
+    shortcut = _startup_shortcut()
+    error = _create_shortcut(shortcut, "-m doc_reader.windows_app start --no-open --quiet", "Doc Reader local speech workspace")
+    if error:
+        print(f"[doc-reader] Could not create startup shortcut: {error}")
         return 1
     print(f"[doc-reader] Startup shortcut created: {shortcut}")
     return 0
@@ -506,6 +579,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="Show service health")
     sub.add_parser("doctor", help="Check Python, CUDA, Kokoro, ffmpeg, espeak, microphone")
     sub.add_parser("open", help="Open the web app (starting services if needed)")
+    sub.add_parser("install-shortcuts", help="Put a clickable Doc Reader on the Desktop and in the Start menu")
+    sub.add_parser("remove-shortcuts", help="Remove the Desktop and Start menu shortcuts")
     sub.add_parser("enable-startup", help="Start Doc Reader automatically at login")
     sub.add_parser("disable-startup", help="Remove the login startup shortcut")
     for name in SERVICES:
@@ -531,6 +606,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status()
     if command == "doctor":
         return cmd_doctor()
+    if command == "install-shortcuts":
+        return install_shortcuts()
+    if command == "remove-shortcuts":
+        return remove_shortcuts()
     if command == "open":
         return cmd_open()
     if command == "enable-startup":
